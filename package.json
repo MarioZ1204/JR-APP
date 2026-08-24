@@ -1,0 +1,19 @@
+{
+  "name": "jr-restaurante",
+  "version": "1.0.0",
+  "description": "Sistema de gestión para restaurante — local, red LAN, sin servidor externo",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "backup": "node -e \"require('./server/backup').manualBackup()\""
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "socket.io": "^4.8.1"
+  }
+}
