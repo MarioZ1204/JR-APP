@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { getDb, getSetting } = require('./db');
+const { parseRemoved } = require('./inventory');
 
 function money(n) {
   return '$ ' + Math.round(Number(n) || 0).toLocaleString('es-CO');
@@ -12,6 +13,13 @@ function pad(left, right, width) {
   const r = ascii(right);
   const space = Math.max(1, width - l.length - r.length);
   return l + ' '.repeat(space) + r;
+}
+
+function removedLine(it) {
+  const list = parseRemoved(it.removed_json);
+  if (!list.length) return '';
+  const names = list.map((x) => x.name).filter(Boolean);
+  return names.length ? 'Sin ' + names.join(', ') : '';
 }
 
 function wrap(text, width) {
@@ -53,7 +61,7 @@ function invoicePayload(invoiceId) {
   if (!inv) return null;
 
   const items = db.prepare(`
-    SELECT product_name, quantity, unit_price, notes
+    SELECT product_name, quantity, unit_price, notes, removed_json
     FROM order_items
     WHERE order_id = ? AND status != 'cancelled'
     ORDER BY id
@@ -86,6 +94,7 @@ function ticketLines(payload) {
   for (const it of items) {
     push(pad(`${it.quantity}x ${it.product_name}`, money(it.quantity * it.unit_price), cols));
     if (it.notes) wrap('  * ' + it.notes, cols).forEach(push);
+    if (removedLine(it)) wrap('  * ' + removedLine(it), cols).forEach(push);
   }
   push('-'.repeat(cols));
   push(pad('Subtotal', money(inv.subtotal), cols));
@@ -96,6 +105,7 @@ function ticketLines(payload) {
     const label = p.method === 'efectivo' ? 'Efectivo' : p.method === 'nequi' ? 'Nequi' : 'Daviplata';
     push(pad(label, money(p.amount), cols));
   }
+  if (Number(payload.change) > 0) push(pad('Vuelto', money(payload.change), cols));
   push('-'.repeat(cols));
   wrap(getSetting('ticket_footer', 'Gracias por su visita'), cols).forEach(push);
   push('');
@@ -131,7 +141,7 @@ function ticketHtml(payload) {
 
   const rows = items.map((it) => `
     <tr>
-      <td>${it.quantity}x ${escapeHtml(it.product_name)}${it.notes ? `<div class="note">${escapeHtml(it.notes)}</div>` : ''}</td>
+      <td>${it.quantity}x ${escapeHtml(it.product_name)}${it.notes ? `<div class="note">${escapeHtml(it.notes)}</div>` : ''}${removedLine(it) ? `<div class="note">${escapeHtml(removedLine(it))}</div>` : ''}</td>
       <td class="r">${money(it.quantity * it.unit_price)}</td>
     </tr>`).join('');
 
@@ -175,6 +185,7 @@ function ticketHtml(payload) {
   </table>
   <hr>
   <table>${pays}</table>
+  ${Number(payload.change) > 0 ? `<table><tr class="total"><td>Vuelto</td><td class="r">${money(payload.change)}</td></tr></table>` : ''}
   <hr>
   <p class="c">${escapeHtml(footer)}</p>
 </body></html>`;
@@ -205,6 +216,7 @@ function kitchenPayload(order, items, stationLabel, extraRound) {
   for (const it of items) {
     wrap(`${it.quantity}x ${it.product_name}`, cols).forEach(push);
     if (it.notes) wrap('  * ' + it.notes, cols).forEach(push);
+    if (removedLine(it)) wrap('  * ' + removedLine(it), cols).forEach(push);
     push('');
   }
   push('-'.repeat(cols));
@@ -237,6 +249,11 @@ function buildKitchenEscPos(payload) {
         chunks.push(Buffer.from(ascii(l) + '\n', 'latin1'));
       });
     }
+    if (removedLine(it)) {
+      wrap('  * ' + removedLine(it), cols).forEach((l) => {
+        chunks.push(Buffer.from(ascii(l) + '\n', 'latin1'));
+      });
+    }
     chunks.push(Buffer.from('\n'));
   }
   chunks.push(Buffer.from(dash + '\n\n\n', 'latin1'));
@@ -249,6 +266,7 @@ function kitchenHtml(payload) {
   const rows = items.map((it) => `
     <div class="item">${it.quantity}x ${escapeHtml(it.product_name)}
       ${it.notes ? `<div class="note">* ${escapeHtml(it.notes)}</div>` : ''}
+      ${removedLine(it) ? `<div class="note">* ${escapeHtml(removedLine(it))}</div>` : ''}
     </div>`).join('');
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -296,9 +314,10 @@ function printRawWindows(buffer, printerName) {
   });
 }
 
-async function printInvoice(invoiceId) {
+async function printInvoice(invoiceId, extra = {}) {
   const payload = invoicePayload(invoiceId);
   if (!payload) return { ok: false, error: 'Cuenta no encontrada', html: null };
+  if (Number(extra.change) > 0) payload.change = Number(extra.change);
 
   const html = ticketHtml(payload);
   const enabled = getSetting('printer_enabled', '0') === '1';
@@ -404,4 +423,230 @@ async function printKitchenOrder({ order, items, extraRound }) {
   }
 }
 
-module.exports = { printInvoice, printTest, printKitchenOrder, invoicePayload, ticketHtml };
+function paperSize() {
+  const widthMm = Number(getSetting('printer_width', '80')) === 58 ? 58 : 80;
+  const cols = widthMm === 58 ? 32 : 48;
+  return { widthMm, cols };
+}
+
+function nowLocal() {
+  return new Date().toLocaleString('es-CO');
+}
+
+function headerLines(cols) {
+  const lines = [getSetting('business_name', 'JR Burger')];
+  const nit = getSetting('business_nit', '');
+  const address = getSetting('business_address', '');
+  const phone = getSetting('business_phone', '');
+  if (nit) lines.push('NIT ' + nit);
+  if (address) wrap(address, cols).forEach((l) => lines.push(l));
+  if (phone) lines.push(phone);
+  lines.push('-'.repeat(cols));
+  return lines;
+}
+
+function htmlFromLines(title, lines) {
+  const { widthMm } = paperSize();
+  const name = getSetting('business_name', 'JR Burger');
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
+<style>
+  @page { size: ${widthMm}mm auto; margin: 2mm; }
+  body { font-family: 'Courier New', monospace; font-size: 12px; width: ${widthMm}mm; margin: 0 auto; color: #000; }
+  h1 { font-size: 12px; margin: 0 0 4px; text-align: center; }
+  pre { font-family: inherit; font-size: 12px; white-space: pre-wrap; margin: 0; }
+</style></head>
+<body>
+  <h1><img src="/logo.png" alt="" width="56" height="56" style="display:block;margin:0 auto 6px;object-fit:contain">${escapeHtml(name)}</h1>
+  <pre>${escapeHtml(lines.join('\n'))}</pre>
+</body></html>`;
+}
+
+function buildLinesEscPos(lines) {
+  const chunks = [Buffer.from([0x1b, 0x40])];
+  chunks.push(Buffer.from([0x1b, 0x61, 0x01]));
+  let centered = true;
+  for (let i = 0; i < lines.length; i++) {
+    if (i === 3 && centered) {
+      chunks.push(Buffer.from([0x1b, 0x61, 0x00]));
+      centered = false;
+    }
+    chunks.push(Buffer.from(ascii(lines[i]) + '\n', 'latin1'));
+  }
+  chunks.push(Buffer.from('\n\n'));
+  chunks.push(Buffer.from([0x1d, 0x56, 0x00]));
+  return Buffer.concat(chunks);
+}
+
+async function printLines(title, lines, { savedMsg, failMsg }) {
+  const html = htmlFromLines(title, lines);
+  const enabled = getSetting('printer_enabled', '0') === '1';
+  const printerName = getSetting('printer_name', '').trim();
+  if (!enabled || !printerName) {
+    return { ok: true, mode: 'browser', html, message: savedMsg };
+  }
+  try {
+    const sent = await printRawWindows(buildLinesEscPos(lines), printerName);
+    if (sent.ok) return { ok: true, mode: 'usb', html, message: 'Ticket enviado a la impresora' };
+    return { ok: false, mode: 'browser', html, error: sent.error, message: failMsg };
+  } catch (e) {
+    return { ok: false, mode: 'browser', html, error: e.message, message: failMsg };
+  }
+}
+
+function cashDiffText(n) {
+  const v = Number(n) || 0;
+  if (Math.round(v) === 0) return 'Cuadro';
+  if (v > 0) return 'Sobra ' + money(v);
+  return 'Falta ' + money(-v);
+}
+
+function methodLabel(m) {
+  if (m === 'efectivo') return 'Efectivo';
+  if (m === 'nequi') return 'Nequi';
+  if (m === 'daviplata') return 'Daviplata';
+  return m || '';
+}
+
+function loadRegister(registerId) {
+  const db = getDb();
+  const register = db.prepare(`
+    SELECT r.*, ou.name AS opened_by_name, cu.name AS closed_by_name
+    FROM cash_registers r
+    JOIN users ou ON ou.id = r.opened_by
+    LEFT JOIN users cu ON cu.id = r.closed_by
+    WHERE r.id = ?
+  `).get(registerId);
+  if (!register) return null;
+  const moves = db.prepare(
+    'SELECT * FROM cash_movements WHERE register_id = ? ORDER BY id'
+  ).all(registerId);
+  const byMethod = { efectivo: 0, nequi: 0, daviplata: 0 };
+  let sales = 0;
+  let expenses = 0;
+  for (const m of moves) {
+    if (m.type === 'sale') {
+      sales += m.amount;
+      if (byMethod[m.method] != null) byMethod[m.method] += m.amount;
+    } else if (m.type === 'expense' || m.type === 'withdrawal') {
+      expenses += m.amount;
+    }
+  }
+  const expected_cash = register.opening_amount + byMethod.efectivo - expenses;
+  return { register, moves, sales, expenses, byMethod, expected_cash };
+}
+
+function cashOpenLines(pack) {
+  const { cols } = paperSize();
+  const r = pack.register;
+  const lines = headerLines(cols);
+  lines.push('APERTURA DE CAJA');
+  lines.push('-'.repeat(cols));
+  lines.push('Fecha: ' + (r.opened_at || nowLocal()));
+  lines.push('Cajero: ' + (r.opened_by_name || ''));
+  lines.push(pad('Base', money(r.opening_amount), cols));
+  lines.push('-'.repeat(cols));
+  wrap('Conserve este ticket para el cierre.', cols).forEach((l) => lines.push(l));
+  lines.push('');
+  return lines;
+}
+
+function cashExpenseLines({ userName, amount, description, expected }) {
+  const { cols } = paperSize();
+  const lines = headerLines(cols);
+  lines.push('GASTO DE CAJA');
+  lines.push('-'.repeat(cols));
+  lines.push('Fecha: ' + nowLocal());
+  if (userName) lines.push('Cajero: ' + userName);
+  if (description) wrap(description, cols).forEach((l) => lines.push(l));
+  lines.push(pad('Valor', money(amount), cols));
+  if (expected != null) lines.push(pad('Queda en caja', money(expected), cols));
+  lines.push('-'.repeat(cols));
+  lines.push('');
+  return lines;
+}
+
+function cashCloseLines(pack) {
+  const { cols } = paperSize();
+  const r = pack.register;
+  const lines = headerLines(cols);
+  lines.push('CIERRE DE CAJA');
+  lines.push('-'.repeat(cols));
+  lines.push('Abrio: ' + (r.opened_at || ''));
+  lines.push('Cerro: ' + (r.closed_at || nowLocal()));
+  if (r.opened_by_name) lines.push('Por: ' + r.opened_by_name);
+  if (r.closed_by_name) lines.push('Cierre: ' + r.closed_by_name);
+  lines.push('-'.repeat(cols));
+  lines.push(pad('Base', money(r.opening_amount), cols));
+  lines.push(pad('Ventas', money(pack.sales), cols));
+  lines.push(pad('Efectivo', money(pack.byMethod.efectivo), cols));
+  lines.push(pad('Nequi', money(pack.byMethod.nequi), cols));
+  lines.push(pad('Daviplata', money(pack.byMethod.daviplata), cols));
+  lines.push(pad('Gastos', money(pack.expenses), cols));
+  lines.push('-'.repeat(cols));
+  const expected = r.expected_cash != null ? r.expected_cash : pack.expected_cash;
+  const counted = r.closing_counted;
+  const diff = r.difference != null ? r.difference : (counted != null ? counted - expected : 0);
+  lines.push(pad('Deberia haber', money(expected), cols));
+  if (counted != null) lines.push(pad('Contado', money(counted), cols));
+  lines.push(pad(cashDiffText(diff), money(Math.abs(diff)), cols));
+  if (r.notes) {
+    lines.push('-'.repeat(cols));
+    wrap('Nota: ' + r.notes, cols).forEach((l) => lines.push(l));
+  }
+  const gastos = pack.moves.filter((m) => m.type === 'expense' || m.type === 'withdrawal');
+  if (gastos.length) {
+    lines.push('-'.repeat(cols));
+    lines.push('Gastos:');
+    for (const m of gastos) {
+      wrap((m.description || 'Gasto') + ' ' + money(m.amount), cols).forEach((l) => lines.push(l));
+    }
+  }
+  lines.push('-'.repeat(cols));
+  lines.push('');
+  return lines;
+}
+
+async function printCashOpen(registerId, { reprint } = {}) {
+  const pack = loadRegister(registerId);
+  if (!pack) return { ok: false, error: 'Caja no encontrada', html: null };
+  return printLines('Apertura de caja', cashOpenLines(pack), {
+    savedMsg: reprint
+      ? 'Se abre el ticket de apertura.'
+      : 'Se abre el ticket de apertura. La caja ya quedó abierta.',
+    failMsg: reprint
+      ? 'No se pudo imprimir. Puede imprimir el ticket desde el computador.'
+      : 'La caja ya quedó abierta. Puede imprimir el ticket desde el computador.'
+  });
+}
+
+async function printCashExpense(info) {
+  return printLines('Gasto de caja', cashExpenseLines(info), {
+    savedMsg: 'Se abre el ticket del gasto. Ya quedó anotado.',
+    failMsg: 'El gasto ya quedó. Puede imprimir el ticket desde el computador.'
+  });
+}
+
+async function printCashClose(registerId, { reprint } = {}) {
+  const pack = loadRegister(registerId);
+  if (!pack) return { ok: false, error: 'Caja no encontrada', html: null };
+  return printLines('Cierre de caja', cashCloseLines(pack), {
+    savedMsg: reprint
+      ? 'Se abre el ticket de cierre.'
+      : 'Se abre el ticket de cierre. La caja ya quedó cerrada.',
+    failMsg: reprint
+      ? 'No se pudo imprimir. Puede imprimir el ticket desde el computador.'
+      : 'La caja ya quedó cerrada. Puede imprimir el ticket desde el computador.'
+  });
+}
+
+module.exports = {
+  printInvoice,
+  printTest,
+  printKitchenOrder,
+  printCashOpen,
+  printCashExpense,
+  printCashClose,
+  invoicePayload,
+  ticketHtml
+};

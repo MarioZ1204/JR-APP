@@ -1,16 +1,38 @@
 const { getDb } = require('./db');
 
+function parseRemoved(raw) {
+  try {
+    const v = JSON.parse(raw || '[]');
+    if (!Array.isArray(v)) return [];
+    return v.map((x) => {
+      if (x && typeof x === 'object') return { id: Number(x.id), name: String(x.name || '') };
+      return { id: Number(x), name: '' };
+    }).filter((x) => x.id);
+  } catch {
+    return [];
+  }
+}
+
+function removedIdSet(raw) {
+  return new Set(parseRemoved(raw).map((x) => x.id));
+}
+
 function recipeForProduct(productId) {
   return getDb().prepare(`
-    SELECT r.quantity, i.id AS ingredient_id, i.name, i.unit, i.stock, i.min_stock
+    SELECT r.quantity, r.removable, i.id AS ingredient_id, i.name, i.unit, i.stock
     FROM recipes r
     JOIN ingredients i ON i.id = r.ingredient_id
     WHERE r.product_id = ?
   `).all(productId);
 }
 
-function checkStock(productId, quantity) {
-  const recipe = recipeForProduct(productId);
+function recipeUsed(productId, removedRaw) {
+  const skip = removedIdSet(removedRaw);
+  return recipeForProduct(productId).filter((line) => !skip.has(line.ingredient_id));
+}
+
+function checkStock(productId, quantity, removedRaw) {
+  const recipe = recipeUsed(productId, removedRaw);
   const shortages = [];
   for (const line of recipe) {
     const need = line.quantity * quantity;
@@ -24,7 +46,8 @@ function checkStock(productId, quantity) {
       });
     }
   }
-  return { ok: shortages.length === 0, shortages, recipe };
+  const ok = shortages.length === 0;
+  return { ok, shortages, recipe };
 }
 
 function checkItemsStock(items) {
@@ -34,7 +57,7 @@ function checkItemsStock(items) {
   const stocks = new Map();
 
   for (const it of items) {
-    const recipe = recipeForProduct(it.product_id);
+    const recipe = recipeUsed(it.product_id, it.removed_json);
     for (const line of recipe) {
       names.set(line.ingredient_id, line.name);
       units.set(line.ingredient_id, line.unit);
@@ -56,14 +79,24 @@ function checkItemsStock(items) {
       });
     }
   }
-  return { ok: shortages.length === 0, shortages };
+  const ok = shortages.length === 0;
+  return { ok, shortages };
 }
 
-function moveStock({ ingredientId, type, quantity, reason, userId, referenceType, referenceId }) {
+function moveStock({ ingredientId, type, quantity, reason, userId, referenceType, referenceId, allowNegative = false }) {
   const db = getDb();
   const ing = db.prepare('SELECT * FROM ingredients WHERE id = ?').get(ingredientId);
-  if (!ing) throw new Error('Ingrediente no encontrado');
+  if (!ing) {
+    const err = new Error('Ingrediente no encontrado');
+    err.http = 404;
+    throw err;
+  }
   const next = ing.stock + quantity;
+  if (!allowNegative && next < -1e-9) {
+    const err = new Error(`No hay suficiente ${ing.name}. Quedan ${ing.stock} ${ing.unit}.`);
+    err.http = 400;
+    throw err;
+  }
   db.prepare('UPDATE ingredients SET stock = ? WHERE id = ?').run(next, ingredientId);
   db.prepare(`
     INSERT INTO inventory_movements
@@ -76,22 +109,25 @@ function moveStock({ ingredientId, type, quantity, reason, userId, referenceType
 function consumeOrder(orderId, userId) {
   const db = getDb();
   const items = db.prepare(`
-    SELECT product_id, quantity, product_name
+    SELECT product_id, quantity, product_name, removed_json
     FROM order_items
     WHERE order_id = ? AND status != 'cancelled'
   `).all(orderId);
 
   for (const it of items) {
-    const recipe = recipeForProduct(it.product_id);
+    const recipe = recipeUsed(it.product_id, it.removed_json);
+    const skipped = parseRemoved(it.removed_json).map((x) => x.name).filter(Boolean);
+    const extra = skipped.length ? ` (sin ${skipped.join(', ')})` : '';
     for (const line of recipe) {
       moveStock({
         ingredientId: line.ingredient_id,
         type: 'sale',
         quantity: -(line.quantity * it.quantity),
-        reason: `Venta: ${it.product_name} x${it.quantity}`,
+        reason: `Venta: ${it.product_name} x${it.quantity}${extra}`,
         userId,
         referenceType: 'order',
-        referenceId: orderId
+        referenceId: orderId,
+        allowNegative: true
       });
     }
   }
@@ -100,13 +136,13 @@ function consumeOrder(orderId, userId) {
 function restoreOrder(orderId, userId) {
   const db = getDb();
   const items = db.prepare(`
-    SELECT product_id, quantity, product_name
+    SELECT product_id, quantity, product_name, removed_json
     FROM order_items
     WHERE order_id = ? AND status != 'cancelled'
   `).all(orderId);
 
   for (const it of items) {
-    const recipe = recipeForProduct(it.product_id);
+    const recipe = recipeUsed(it.product_id, it.removed_json);
     for (const line of recipe) {
       moveStock({
         ingredientId: line.ingredient_id,
@@ -130,11 +166,17 @@ function lowStock() {
 }
 
 module.exports = {
+  parseRemoved,
   recipeForProduct,
+  recipeForProduct: recipeForProduct,
+  recipeUsed,
   checkStock,
+  checkStock: checkStock,
   checkItemsStock,
+  checkItemsStock: checkItemsStock,
   moveStock,
   consumeOrder,
+  consumeOrder: consumeOrder,
   restoreOrder,
   lowStock
 };

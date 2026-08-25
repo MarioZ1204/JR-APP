@@ -1,9 +1,9 @@
 const path = require('path');
-const os = require('os');
 const http = require('http');
 const express = require('express');
 const session = require('express-session');
 const { Server } = require('socket.io');
+const { lanUrls } = require('./lan');
 
 const major = Number(process.versions.node.split('.')[0]);
 if (major < 22) {
@@ -22,7 +22,9 @@ autoBackup();
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  cors: { origin: true, credentials: true }
+});
 
 const sessionMiddleware = session({
   name: 'jr.sid',
@@ -51,6 +53,16 @@ app.get('*', (req, res, next) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
+app.use((err, req, res, next) => {
+  console.error(err);
+  if (res.headersSent) return next(err);
+  const status = Number(err.http || err.status || 500);
+  if (String(req.path || '').startsWith('/api')) {
+    return res.status(status).json({ error: err.message || 'No se pudo completar. Intente de nuevo.' });
+  }
+  res.status(status).send('Error');
+});
+
 const wrap = (middleware) => (socket, next) => middleware(socket.request, {}, next);
 io.use(wrap(sessionMiddleware));
 io.use((socket, next) => {
@@ -64,29 +76,19 @@ io.on('connection', (socket) => {
   socket.emit('hello', { user: socket.user });
 });
 
-function lanIPs() {
-  const out = [];
-  const nets = os.networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name] || []) {
-      const family = net.family === 'IPv4' || net.family === 4;
-      if (family && !net.internal) out.push(net.address);
-    }
-  }
-  return out;
-}
-
 const PORT = Number(process.env.PORT || 3000);
 server.listen(PORT, '0.0.0.0', () => {
-  const ips = lanIPs();
+  const urls = lanUrls(PORT);
   console.log('');
   console.log('  JR Burger — sistema local');
   console.log('  --------------------------------');
-  console.log(`  En este PC:   http://localhost:${PORT}`);
-  if (ips.length) {
-    for (const ip of ips) console.log(`  En la red:    http://${ip}:${PORT}`);
+  console.log(`  En este PC:     http://localhost:${PORT}`);
+  if (urls.length) {
+    for (const url of urls) console.log(`  En el celular:  ${url}`);
+    console.log('  Escriba la dirección completa, con :' + PORT + ' al final.');
+    console.log('  El celular debe estar en la misma red (no datos móviles).');
   } else {
-    console.log('  (No se detectó IP de red local)');
+    console.log('  (No hay IP de red usable. Conecte el PC por cable o WiFi del local.)');
   }
   console.log('');
   console.log('  Usuarios iniciales: admin / mesero / cocina / cajero');

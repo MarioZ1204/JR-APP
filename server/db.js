@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
+const { seedCatalog } = require('./catalog');
 const { DatabaseSync } = require('node:sqlite');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -24,6 +25,7 @@ function wrap(raw) {
           const r = stmt.run(...args);
           return {
             changes: Number(r.changes),
+            lastInsertRowid: Number(r.lastInsertRowid),
             lastInsertRowid: Number(r.lastInsertRowid)
           };
         },
@@ -40,7 +42,10 @@ function init() {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   createSchema();
+  migrateSchema();
   seedIfEmpty();
+  seedCatalog(getDb());
+  markCoreRecipeLines();
   if (getSetting('business_name') === 'JR Restaurante') {
     setSetting('business_name', 'JR Burger');
   }
@@ -101,6 +106,7 @@ function createSchema() {
       product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
       ingredient_id INTEGER NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
       quantity REAL NOT NULL,
+      removable INTEGER NOT NULL DEFAULT 1,
       UNIQUE(product_id, ingredient_id)
     );
 
@@ -130,7 +136,8 @@ function createSchema() {
       cancelled_by INTEGER REFERENCES users(id),
       cancelled_at TEXT,
       cancel_reason TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      removed_json TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE TABLE IF NOT EXISTS item_changes (
@@ -222,6 +229,42 @@ function createSchema() {
   `);
 }
 
+function tableCols(name) {
+  return getDb().prepare(`PRAGMA table_info(${name})`).all().map((c) => c.name);
+}
+
+function migrateSchema() {
+  const recipeCols = tableCols('recipes');
+  if (!recipeCols.includes('removable')) {
+    getDb().exec('ALTER TABLE recipes ADD COLUMN removable INTEGER NOT NULL DEFAULT 1');
+  }
+  const itemCols = tableCols('order_items');
+  if (!itemCols.includes('removed_json')) {
+    getDb().exec("ALTER TABLE order_items ADD COLUMN removed_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  const prodCols = tableCols('products');
+  if (!prodCols.includes('sort_order')) {
+    getDb().exec('ALTER TABLE products ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!prodCols.includes('choices_json')) {
+    getDb().exec("ALTER TABLE products ADD COLUMN choices_json TEXT NOT NULL DEFAULT '[]'");
+  }
+}
+
+function markCoreRecipeLines() {
+  const done = getDb().prepare("SELECT value FROM settings WHERE key = 'recipe_core_fixed'").get();
+  if (done) return;
+  getDb().prepare(`
+    UPDATE recipes SET removable = 0
+    WHERE ingredient_id IN (
+      SELECT id FROM ingredients WHERE name IN (
+        'Pan de hamburguesa', 'Carne molida', 'Papa', 'Aceite', 'Mezcla brownie'
+      )
+    )
+  `).run();
+  getDb().prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('recipe_core_fixed', '1')").run();
+}
+
 const DEFAULT_SETTINGS = {
   business_name: 'JR Burger',
   business_nit: '',
@@ -294,18 +337,18 @@ function seedIfEmpty() {
   const chocolate = insertIng.run('Mezcla brownie', 'porción', 20, 5).lastInsertRowid;
 
   const insertRecipe = db.prepare(
-    'INSERT INTO recipes (product_id, ingredient_id, quantity) VALUES (?, ?, ?)'
+    'INSERT INTO recipes (product_id, ingredient_id, quantity, removable) VALUES (?, ?, ?, ?)'
   );
-  insertRecipe.run(burger, pan, 1);
-  insertRecipe.run(burger, carne, 150);
-  insertRecipe.run(burger, lechuga, 2);
-  insertRecipe.run(burger, tomate, 2);
-  insertRecipe.run(burger, queso, 1);
-  insertRecipe.run(papas, papa, 200);
-  insertRecipe.run(papas, aceite, 20);
+  insertRecipe.run(burger, pan, 1, 0);
+  insertRecipe.run(burger, carne, 150, 0);
+  insertRecipe.run(burger, lechuga, 2, 1);
+  insertRecipe.run(burger, tomate, 2, 1);
+  insertRecipe.run(burger, queso, 1, 1);
+  insertRecipe.run(papas, papa, 200, 0);
+  insertRecipe.run(papas, aceite, 20, 0);
 
   const brownie = db.prepare("SELECT id FROM products WHERE name = 'Brownie'").get();
-  if (brownie) insertRecipe.run(brownie.id, chocolate, 1);
+  if (brownie) insertRecipe.run(brownie.id, chocolate, 1, 0);
 
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(key, value);
@@ -356,10 +399,14 @@ function publicUser(user) {
 
 module.exports = {
   init,
+  init: init,
   getDb,
   getSetting,
   setSetting,
   getAllSettings,
+  getSetting: getSetting,
+  setSetting: setSetting,
+  getAllSettings: getAllSettings,
   now,
   publicUser,
   DB_PATH,

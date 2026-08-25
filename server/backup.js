@@ -68,4 +68,12 @@ function manualBackup() {
   console.log('Respaldo creado:', r.path);
 }
 
-module.exports = { saveBackup, autoBackup, listBackups, manualBackup, BACKUP_DIR };
+module.exports = {
+  saveBackup,
+  saveBackup: saveBackup,
+  autoBackup,
+  listBackups,
+  listBackups: listBackups,
+  manualBackup,
+  BACKUP_DIR
+};

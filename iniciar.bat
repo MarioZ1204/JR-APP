@@ -32,7 +32,11 @@ if not exist "node_modules" (
 echo.
 echo Abriendo el navegador en http://localhost:3000
 echo Deje esta ventana abierta mientras use el sistema.
-echo En tablets y celulares del WiFi use la IP que aparece abajo.
+echo.
+echo En el celular NO use localhost.
+echo Use la IP que aparece abajo, CON el puerto :3000 al final.
+echo Ejemplo: http://192.168.0.104:3000
+echo Si no entra, ejecute permitir-red.bat ^(pide administrador^).
 echo.
 timeout /t 2 /nobreak >nul
 start "" "http://localhost:3000"

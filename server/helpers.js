@@ -39,12 +39,58 @@ function openOrderForTable(tableId) {
   `).get(tableId);
 }
 
+function presentStatus(status) {
+  if (status === 'waiting_payment') return 'waiting_payment';
+  return status;
+}
+
+function presentTable(t) {
+  if (!t) return t;
+  const joined = t.joined_to_id ?? t.joined_to_id ?? null;
+  return {
+    ...t,
+    status: presentStatus(t.status),
+    joined_to_id: joined,
+    joined_to_id: joined,
+    joined_to_name: t.joined_to_name ?? t.joined_to_name ?? null
+  };
+}
+
+function presentItem(i) {
+  const price = i.unit_price ?? i.unit_price;
+  return {
+    ...i,
+    unit_price: price,
+    unit_price: price,
+    created_by: i.created_by ?? i.created_by,
+    cancelled_by: i.cancelled_by ?? i.cancelled_by,
+    cancelled_at: i.cancelled_at ?? i.cancelled_at,
+    cancel_reason: i.cancel_reason ?? i.cancel_reason,
+    removed_json: i.removed_json ?? i.removed_json
+  };
+}
+
+function presentOrder(o) {
+  if (!o) return o;
+  const items = (o.items || []).map(presentItem);
+  const subtotal = o.subtotal != null ? o.subtotal : items
+    .filter((i) => i.status !== 'cancelled')
+    .reduce((s, i) => s + i.quantity * (i.unit_price ?? i.unit_price ?? 0), 0);
+  return {
+    ...o,
+    table_name: o.table_name || o.table_name,
+    waiter_name: o.waiter_name || o.waiter_name,
+    items,
+    subtotal
+  };
+}
+
 function refreshTableStatus(tableId) {
   const db = getDb();
   const table = db.prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(tableId);
   if (!table) return null;
   if (table.joined_to_id) {
-    return refreshTableStatus(table.joined_to_id);
+    return presentTable(refreshTableStatus(table.joined_to_id));
   }
 
   const order = openOrderForTable(tableId);
@@ -52,11 +98,11 @@ function refreshTableStatus(tableId) {
   if (!order) {
     status = table.status === 'reserved' ? 'reserved' : 'free';
   } else {
-    const waiting = table.status === 'waiting_payment';
+    const waiting = table.status === 'waiting_payment' || table.status === 'waiting_payment';
     status = waiting ? 'waiting_payment' : 'occupied';
   }
   db.prepare('UPDATE restaurant_tables SET status = ? WHERE id = ?').run(status, tableId);
-  return db.prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(tableId);
+  return presentTable(db.prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(tableId));
 }
 
 function primaryTableId(tableId) {
@@ -88,7 +134,7 @@ function orderWithItems(orderId) {
   const subtotal = items
     .filter((i) => i.status !== 'cancelled')
     .reduce((s, i) => s + i.quantity * i.unit_price, 0);
-  return { ...order, items, subtotal };
+  return presentOrder({ ...order, items, subtotal });
 }
 
 function syncOrderStatus(orderId) {
@@ -122,6 +168,50 @@ function currentRegister() {
   `).get();
 }
 
+function salonSnapshot() {
+  const db = getDb();
+  const open_orders = db.prepare(`
+    SELECT COUNT(*) AS n FROM orders WHERE status NOT IN ('billed','cancelled')
+  `).get().n;
+  const occupied_tables = db.prepare(`
+    SELECT COUNT(*) AS n FROM restaurant_tables
+    WHERE status IN ('occupied','waiting_payment') OR joined_to_id IS NOT NULL
+  `).get().n;
+  return { open_orders, occupied_tables };
+}
+
+function freeTableAndJoins(tableId) {
+  const db = getDb();
+  const id = primaryTableId(tableId);
+  db.prepare(`
+    UPDATE restaurant_tables SET status = 'free', joined_to_id = NULL
+    WHERE id = ? OR joined_to_id = ?
+  `).run(id, id);
+}
+
+function cancelOpenOrder(orderId, userId, reason) {
+  const db = getDb();
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order || ['billed', 'cancelled'].includes(order.status)) return null;
+  const why = String(reason || 'Cuenta cancelada');
+  const items = db.prepare(
+    "SELECT id FROM order_items WHERE order_id = ? AND status != 'cancelled'"
+  ).all(orderId);
+  const upd = db.prepare(`
+    UPDATE order_items
+    SET status = 'cancelled', cancelled_by = ?, cancelled_at = datetime('now','localtime'), cancel_reason = ?
+    WHERE id = ?
+  `);
+  for (const it of items) {
+    upd.run(userId, why, it.id);
+    logChange(it.id, userId, 'cancel', { reason: why, order: true });
+  }
+  db.prepare("UPDATE orders SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE id = ?")
+    .run(orderId);
+  freeTableAndJoins(order.table_id);
+  return orderWithItems(orderId);
+}
+
 function tableList() {
   const db = getDb();
   const tables = db.prepare(`
@@ -145,7 +235,7 @@ function tableList() {
         item_count: full.items.filter((i) => i.status !== 'cancelled').length
       };
     }
-    return { ...t, order: summary };
+    return presentTable({ ...t, order: summary });
   });
 }
 
@@ -155,10 +245,20 @@ module.exports = {
   logChange,
   emit,
   openOrderForTable,
+  openOrderForTable: openOrderForTable,
   refreshTableStatus,
+  refreshTableStatus: refreshTableStatus,
   primaryTableId,
   orderWithItems,
+  orderWithItems: orderWithItems,
   syncOrderStatus,
   currentRegister,
-  tableList
+  currentRegister: currentRegister,
+  tableList,
+  tableList: tableList,
+  presentTable,
+  presentOrder,
+  salonSnapshot,
+  freeTableAndJoins,
+  cancelOpenOrder
 };

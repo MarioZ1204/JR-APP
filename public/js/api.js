@@ -1,13 +1,20 @@
 export async function api(path, options = {}) {
-  const res = await fetch(path, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options,
-    body: options.body != null ? JSON.stringify(options.body) : undefined
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options,
+      body: options.body != null ? JSON.stringify(options.body) : undefined
+    });
+  } catch {
+    const err = new Error('No hay conexión con el servidor. ¿Está prendido JR Burger?');
+    err.status = 0;
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || 'Error de red');
+    const err = new Error(data.error || 'No se pudo completar. Intente de nuevo.');
     err.status = res.status;
     err.data = data;
     throw err;
@@ -19,6 +26,7 @@ export const money = (n) => '$ ' + Math.round(Number(n) || 0).toLocaleString('es
 
 export const ROLE = {
   admin: 'Jefe',
+  waiter: 'Mesero',
   waiter: 'Mesero',
   kitchen: 'Cocina',
   cashier: 'Cajero'
