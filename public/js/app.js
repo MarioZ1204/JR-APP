@@ -31,7 +31,8 @@ const state = {
   transferFrom: null,
   socket: null,
   live: false,
-  infoName: 'JR Burger'
+  infoName: 'JR Burger',
+  moreNav: false
 };
 
 function toast(msg, err = false) {
@@ -131,6 +132,7 @@ function paintLive() {
 
 async function loadView(silent = false) {
   const { view, params } = parseHash();
+  if (state.view !== view) state.moreNav = false;
   state.view = view;
   state.params = params;
   if (!state.user && view !== 'login') { go('login'); return; }
@@ -210,22 +212,44 @@ function ico(name) {
     carta: '<path d="M5 4h10l4 4v12a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M14 4v5h5M8 13h8M8 17h6"/>',
     reportes: '<path d="M4 19V9m6 10V5m6 14v-7"/>',
     equipo: '<path d="M16 19v-1a3 3 0 00-3-3H7a3 3 0 00-3 3v1"/><circle cx="9" cy="7" r="3"/><path d="M19 19v-1a3 3 0 00-2-2.8M16 4.1a3 3 0 010 5.8"/>',
-    ajustes: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2m0 14v2M5 12H3m18 0h-2M6.2 6.2l1.4 1.4m9 9l1.4 1.4m0-11.8l-1.4 1.4m-9 9L6.2 17.8"/>'
+    ajustes: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2m0 14v2M5 12H3m18 0h-2M6.2 6.2l1.4 1.4m9 9l1.4 1.4m0-11.8l-1.4 1.4m-9 9L6.2 17.8"/>',
+    mas: '<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
   };
   return `<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
 }
 
+const MOBILE_PRIMARY = new Set(['mesas', 'cocina', 'facturar', 'caja']);
+
+function navBtn(i) {
+  return `<button type="button" class="${state.view === i.id ? 'on' : ''}" data-act="nav" data-view="${i.id}">
+      ${ico(i.ico)}<span>${i.label}</span>
+    </button>`;
+}
+
 function render() {
   if (!state.user || state.view === 'login') {
+    state.moreNav = false;
     root.innerHTML = loginView();
     bind();
     return;
   }
   const brand = esc(state.settings.business_name || 'JR Burger');
-  const links = navFor(state.user.role).map((i) => `
-    <button class="${state.view === i.id ? 'on' : ''}" data-act="nav" data-view="${i.id}">
-      ${ico(i.ico)}<span>${i.label}</span>
-    </button>`).join('');
+  const all = navFor(state.user.role);
+  const sideLinks = all.map(navBtn).join('');
+  const useMore = all.length > 5;
+  const primary = useMore ? all.filter((i) => MOBILE_PRIMARY.has(i.id)) : all;
+  const moreItems = useMore ? all.filter((i) => !MOBILE_PRIMARY.has(i.id)) : [];
+  const moreActive = moreItems.some((i) => i.id === state.view);
+  const bottomLinks = primary.map(navBtn).join('') + (useMore ? `
+    <button type="button" class="${moreActive || state.moreNav ? 'on' : ''}" data-act="toggle-more" aria-expanded="${state.moreNav ? 'true' : 'false'}">
+      ${ico('mas')}<span>Más</span>
+    </button>` : '');
+  const morePanel = state.moreNav && useMore ? `
+    <div class="more-nav-backdrop" data-act="toggle-more" aria-hidden="true"></div>
+    <div class="more-nav" role="dialog" aria-label="Más opciones">
+      <div class="more-nav-title">Más opciones</div>
+      <div class="more-nav-grid">${moreItems.map(navBtn).join('')}</div>
+    </div>` : '';
   root.innerHTML = `
     <div class="app-shell">
       <nav class="sidenav">
@@ -236,7 +260,7 @@ function render() {
           <b>${brand}</b>
           <span>Comidas rápidas</span>
         </div>
-        <div class="sidenav-links">${links}</div>
+        <div class="sidenav-links">${sideLinks}</div>
         <div class="sidenav-foot">
           <div class="who"><span class="live-dot"></span> ${esc(state.user.name)} · ${ROLE[state.user.role]}</div>
           <button class="btn" data-act="logout">Salir</button>
@@ -252,7 +276,8 @@ function render() {
         <button class="icon-btn" data-act="logout" title="Salir">Salir</button>
       </header>
       <main class="page">${viewHtml()}</main>
-      <nav class="bottom-nav">${links}</nav>
+      ${morePanel}
+      <nav class="bottom-nav">${bottomLinks}</nav>
     </div>`;
   paintLive();
   bind();
@@ -736,8 +761,9 @@ async function onClick(e) {
   if (!el || el.tagName === 'FORM' || el.tagName === 'INPUT' || el.tagName === 'SELECT') return;
   const act = el.dataset.act;
   try {
-    if (act === 'nav') go(el.dataset.view);
-    if (act === 'logout') { await api('/api/logout', { method: 'POST' }); state.user = null; go('login'); }
+    if (act === 'nav') { state.moreNav = false; go(el.dataset.view); }
+    if (act === 'toggle-more') { state.moreNav = !state.moreNav; render(); return; }
+    if (act === 'logout') { await api('/api/logout', { method: 'POST' }); state.user = null; state.moreNav = false; go('login'); }
     if (act === 'cat') { state.categoryId = el.dataset.id; render(); }
     if (act === 'table') await onTable(Number(el.dataset.id));
     if (act === 'add-prod') await addProduct(Number(el.dataset.id));
