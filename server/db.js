@@ -72,6 +72,8 @@ function createSchema() {
         CHECK(status IN ('free','occupied','waiting_payment','reserved')),
       joined_to_id INTEGER REFERENCES restaurant_tables(id) ON DELETE SET NULL,
       sort_order INTEGER NOT NULL DEFAULT 0,
+      pos_x REAL,
+      pos_y REAL,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
 
@@ -137,7 +139,8 @@ function createSchema() {
       cancelled_at TEXT,
       cancel_reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-      removed_json TEXT NOT NULL DEFAULT '[]'
+      removed_json TEXT NOT NULL DEFAULT '[]',
+      added_json TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE TABLE IF NOT EXISTS item_changes (
@@ -242,12 +245,33 @@ function migrateSchema() {
   if (!itemCols.includes('removed_json')) {
     getDb().exec("ALTER TABLE order_items ADD COLUMN removed_json TEXT NOT NULL DEFAULT '[]'");
   }
+  if (!itemCols.includes('added_json')) {
+    getDb().exec("ALTER TABLE order_items ADD COLUMN added_json TEXT NOT NULL DEFAULT '[]'");
+  }
   const prodCols = tableCols('products');
   if (!prodCols.includes('sort_order')) {
     getDb().exec('ALTER TABLE products ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
   }
   if (!prodCols.includes('choices_json')) {
     getDb().exec("ALTER TABLE products ADD COLUMN choices_json TEXT NOT NULL DEFAULT '[]'");
+  }
+  const tableColsList = tableCols('restaurant_tables');
+  if (!tableColsList.includes('pos_x')) {
+    getDb().exec('ALTER TABLE restaurant_tables ADD COLUMN pos_x REAL');
+  }
+  if (!tableColsList.includes('pos_y')) {
+    getDb().exec('ALTER TABLE restaurant_tables ADD COLUMN pos_y REAL');
+  }
+  const missingPos = getDb().prepare('SELECT id FROM restaurant_tables WHERE pos_x IS NULL OR pos_y IS NULL ORDER BY sort_order, id').all();
+  if (missingPos.length) {
+    const cols = 4;
+    missingPos.forEach((row, i) => {
+      const col = i % cols;
+      const rowN = Math.floor(i / cols);
+      const pos_x = Math.min(88, Math.max(8, 14 + col * 24));
+      const pos_y = Math.min(88, Math.max(8, 18 + (rowN % 5) * 16));
+      getDb().prepare('UPDATE restaurant_tables SET pos_x = ?, pos_y = ? WHERE id = ?').run(pos_x, pos_y, row.id);
+    });
   }
 }
 
@@ -301,10 +325,10 @@ function seedIfEmpty() {
   insertUser.run('Cajero', 'cajero', hash('cajero123'), 'cashier');
 
   const insertTable = db.prepare(
-    'INSERT INTO restaurant_tables (name, seats, sort_order) VALUES (?, ?, ?)'
+    'INSERT INTO restaurant_tables (name, seats, sort_order, pos_x, pos_y) VALUES (?, ?, ?, ?, ?)'
   );
-  insertTable.run('Mesa 1', 4, 1);
-  insertTable.run('Mesa 2', 4, 2);
+  insertTable.run('Mesa 1', 4, 1, 25, 35);
+  insertTable.run('Mesa 2', 4, 2, 55, 35);
 
   const insertCat = db.prepare(
     'INSERT INTO categories (name, sort_order, station) VALUES (?, ?, ?)'

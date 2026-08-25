@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { getDb, getSetting } = require('./db');
-const { parseRemoved } = require('./inventory');
+const { parseRemoved, parseAdded } = require('./inventory');
 
 function money(n) {
   return '$ ' + Math.round(Number(n) || 0).toLocaleString('es-CO');
@@ -20,6 +20,17 @@ function removedLine(it) {
   if (!list.length) return '';
   const names = list.map((x) => x.name).filter(Boolean);
   return names.length ? 'Sin ' + names.join(', ') : '';
+}
+
+function addedLine(it) {
+  const list = parseAdded(it.added_json);
+  if (!list.length) return '';
+  const names = list.map((x) => x.name).filter(Boolean);
+  return names.length ? 'Extra ' + names.join(', ') : '';
+}
+
+function itemNotesLines(it) {
+  return [removedLine(it), addedLine(it)].filter(Boolean);
 }
 
 function wrap(text, width) {
@@ -61,7 +72,7 @@ function invoicePayload(invoiceId) {
   if (!inv) return null;
 
   const items = db.prepare(`
-    SELECT product_name, quantity, unit_price, notes, removed_json
+    SELECT product_name, quantity, unit_price, notes, removed_json, added_json
     FROM order_items
     WHERE order_id = ? AND status != 'cancelled'
     ORDER BY id
@@ -94,7 +105,7 @@ function ticketLines(payload) {
   for (const it of items) {
     push(pad(`${it.quantity}x ${it.product_name}`, money(it.quantity * it.unit_price), cols));
     if (it.notes) wrap('  * ' + it.notes, cols).forEach(push);
-    if (removedLine(it)) wrap('  * ' + removedLine(it), cols).forEach(push);
+    itemNotesLines(it).forEach((line) => wrap('  * ' + line, cols).forEach(push));
   }
   push('-'.repeat(cols));
   push(pad('Subtotal', money(inv.subtotal), cols));
@@ -141,7 +152,7 @@ function ticketHtml(payload) {
 
   const rows = items.map((it) => `
     <tr>
-      <td>${it.quantity}x ${escapeHtml(it.product_name)}${it.notes ? `<div class="note">${escapeHtml(it.notes)}</div>` : ''}${removedLine(it) ? `<div class="note">${escapeHtml(removedLine(it))}</div>` : ''}</td>
+      <td>${it.quantity}x ${escapeHtml(it.product_name)}${it.notes ? `<div class="note">${escapeHtml(it.notes)}</div>` : ''}${itemNotesLines(it).map((line) => `<div class="note">${escapeHtml(line)}</div>`).join('')}</td>
       <td class="r">${money(it.quantity * it.unit_price)}</td>
     </tr>`).join('');
 
@@ -216,7 +227,7 @@ function kitchenPayload(order, items, stationLabel, extraRound) {
   for (const it of items) {
     wrap(`${it.quantity}x ${it.product_name}`, cols).forEach(push);
     if (it.notes) wrap('  * ' + it.notes, cols).forEach(push);
-    if (removedLine(it)) wrap('  * ' + removedLine(it), cols).forEach(push);
+    itemNotesLines(it).forEach((line) => wrap('  * ' + line, cols).forEach(push));
     push('');
   }
   push('-'.repeat(cols));
@@ -249,11 +260,11 @@ function buildKitchenEscPos(payload) {
         chunks.push(Buffer.from(ascii(l) + '\n', 'latin1'));
       });
     }
-    if (removedLine(it)) {
-      wrap('  * ' + removedLine(it), cols).forEach((l) => {
+    itemNotesLines(it).forEach((line) => {
+      wrap('  * ' + line, cols).forEach((l) => {
         chunks.push(Buffer.from(ascii(l) + '\n', 'latin1'));
       });
-    }
+    });
     chunks.push(Buffer.from('\n'));
   }
   chunks.push(Buffer.from(dash + '\n\n\n', 'latin1'));
@@ -266,7 +277,7 @@ function kitchenHtml(payload) {
   const rows = items.map((it) => `
     <div class="item">${it.quantity}x ${escapeHtml(it.product_name)}
       ${it.notes ? `<div class="note">* ${escapeHtml(it.notes)}</div>` : ''}
-      ${removedLine(it) ? `<div class="note">* ${escapeHtml(removedLine(it))}</div>` : ''}
+      ${itemNotesLines(it).map((line) => `<div class="note">* ${escapeHtml(line)}</div>`).join('')}
     </div>`).join('');
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">

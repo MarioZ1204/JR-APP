@@ -40,7 +40,7 @@ const INGREDIENTS = [
   ['Huevo', 'unidad', 40, 10],
   ['Maduro', 'porción', 30, 8],
   ['Maicitos', 'porción', 40, 10],
-  ['Papas fosforito', 'porción', 50, 12],
+  ['Ripio', 'porción', 50, 12],
   ['Lechuga', 'porción', 50, 12],
   ['Tomate', 'porción', 50, 12],
   ['Salsa tocineta', 'porción', 40, 10],
@@ -50,14 +50,14 @@ const INGREDIENTS = [
 
 const H_BASE = [
   ['Pan hamburguesa', 1, 0],
-  ['Papas fosforito', 1, 1],
+  ['Ripio', 1, 1],
   ['Lechuga', 1, 1],
   ['Tomate', 1, 1]
 ];
 
 const D_BASE = [
   ['Pan perro', 1, 0],
-  ['Papas fosforito', 1, 1]
+  ['Ripio', 1, 1]
 ];
 
 const FRY = [['Papa a la francesa', 1, 0]];
@@ -107,7 +107,7 @@ const PRODUCTS = [
       ] },
       { name: 'Arepa Burger', price: 17000, rec: [
         ['Arepa', 2, 0], ['Carne de hamburguesa', 1, 0], ['Pollo desmechado', 1, 1],
-        ['Tocineta', 1, 1], ['Queso', 1, 1], ['Papas fosforito', 1, 1], ['Lechuga', 1, 1], ['Tomate', 1, 1]
+        ['Tocineta', 1, 1], ['Queso', 1, 1], ['Ripio', 1, 1], ['Lechuga', 1, 1], ['Tomate', 1, 1]
       ] }
     ]
   },
@@ -301,18 +301,20 @@ function seedCatalog(db) {
 }
 
 function patchRipioAndSauces(db) {
-  const done = db.prepare("SELECT value FROM settings WHERE key = 'jr_visual_v2'").get();
-  if (done) return;
-
+  // Renombrar "Papas fosforito" → "Ripio" (mismo ítem / icono)
   const fosfo = db.prepare("SELECT id FROM ingredients WHERE name = 'Papas fosforito'").get();
   const ripio = db.prepare("SELECT id FROM ingredients WHERE name = 'Ripio'").get();
-  if (ripio && !fosfo) {
-    db.prepare("UPDATE ingredients SET name = 'Papas fosforito' WHERE id = ?").run(ripio.id);
-  } else if (ripio && fosfo && ripio.id !== fosfo.id) {
-    db.prepare('UPDATE recipes SET ingredient_id = ? WHERE ingredient_id = ?').run(fosfo.id, ripio.id);
+  if (fosfo && !ripio) {
+    db.prepare("UPDATE ingredients SET name = 'Ripio' WHERE id = ?").run(fosfo.id);
+  } else if (fosfo && ripio && fosfo.id !== ripio.id) {
+    db.prepare('UPDATE recipes SET ingredient_id = ? WHERE ingredient_id = ?').run(ripio.id, fosfo.id);
+    db.prepare('DELETE FROM ingredients WHERE id = ?').run(fosfo.id);
   } else if (!ripio && !fosfo) {
-    ensureIng(db, 'Papas fosforito', 'porción', 50, 12);
+    ensureIng(db, 'Ripio', 'porción', 50, 12);
   }
+
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'jr_visual_v2'").get();
+  if (done) return;
 
   db.prepare(`
     DELETE FROM recipes WHERE ingredient_id IN (

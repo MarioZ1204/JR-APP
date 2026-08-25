@@ -3,7 +3,8 @@ const { getDb, getSetting, setSetting, getAllSettings, publicUser } = require('.
 const {
   requireAuth, requireRole, logChange, emit, openOrderForTable,
   refreshTableStatus, primaryTableId, orderWithItems, syncOrderStatus,
-  currentRegister, tableList, salonSnapshot, cancelOpenOrder, freeTableAndJoins
+  currentRegister, tableList, salonSnapshot, cancelOpenOrder, freeTableAndJoins,
+  nextFloorSlot, presentTable
 } = require('./helpers');
 const inventory = require('./inventory');
 const { saveBackup, listBackups } = require('./backup');
@@ -12,6 +13,12 @@ const { lanUrls } = require('./lan');
 
 function fail(res, status, message) {
   return res.status(status).json({ error: message });
+}
+
+function clampPos(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(92, Math.max(8, Math.round(n * 10) / 10));
 }
 
 function withTx(fn) {
@@ -90,11 +97,12 @@ function mountApi(app) {
     const seats = Number(req.body.seats || 4);
     if (!name) return res.status(400).json({ error: 'Falta el nombre' });
     const max = db().prepare('SELECT COALESCE(MAX(sort_order),0) AS n FROM restaurant_tables').get().n;
+    const slot = nextFloorSlot();
     const info = db().prepare(
-      'INSERT INTO restaurant_tables (name, seats, sort_order) VALUES (?, ?, ?)'
-    ).run(name, seats, max + 1);
+      'INSERT INTO restaurant_tables (name, seats, sort_order, pos_x, pos_y) VALUES (?, ?, ?, ?, ?)'
+    ).run(name, seats, max + 1, slot.pos_x, slot.pos_y);
     emit(req, 'tables:changed', {});
-    res.json({ table: db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(info.lastInsertRowid) });
+    res.json({ table: presentTable(db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(info.lastInsertRowid)) });
   });
 
   app.patch('/api/tables/:id', requireAuth, requireRole(), (req, res) => {
@@ -102,9 +110,27 @@ function mountApi(app) {
     if (!t) return res.status(404).json({ error: 'Mesa no encontrada' });
     const name = req.body.name != null ? String(req.body.name).trim() : t.name;
     const seats = req.body.seats != null ? Number(req.body.seats) : t.seats;
-    db().prepare('UPDATE restaurant_tables SET name = ?, seats = ? WHERE id = ?').run(name, seats, t.id);
+    let posX = t.pos_x;
+    let posY = t.pos_y;
+    if (req.body.pos_x != null || req.body.pos_y != null) {
+      posX = clampPos(req.body.pos_x != null ? req.body.pos_x : t.pos_x);
+      posY = clampPos(req.body.pos_y != null ? req.body.pos_y : t.pos_y);
+    }
+    db().prepare('UPDATE restaurant_tables SET name = ?, seats = ?, pos_x = ?, pos_y = ? WHERE id = ?')
+      .run(name, seats, posX, posY, t.id);
     emit(req, 'tables:changed', {});
-    res.json({ table: db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(t.id) });
+    res.json({ table: presentTable(db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(t.id)) });
+  });
+
+  app.patch('/api/tables/:id/position', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
+    const t = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(req.params.id);
+    if (!t) return res.status(404).json({ error: 'Mesa no encontrada' });
+    const posX = clampPos(req.body.pos_x);
+    const posY = clampPos(req.body.pos_y);
+    if (posX == null || posY == null) return fail(res, 400, 'Falta la posición');
+    db().prepare('UPDATE restaurant_tables SET pos_x = ?, pos_y = ? WHERE id = ?').run(posX, posY, t.id);
+    emit(req, 'tables:changed', {});
+    res.json({ table: presentTable(db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(t.id)) });
   });
 
   app.delete('/api/tables/:id', requireAuth, requireRole(), (req, res) => {
@@ -286,6 +312,7 @@ function mountApi(app) {
     const notes = String(req.body.notes || '').trim();
     const recipe = inventory.recipeForProduct(product.id);
     const allowed = new Set(recipe.filter((l) => Number(l.removable) !== 0).map((l) => l.ingredient_id));
+    const inRecipe = new Set(recipe.map((l) => l.ingredient_id));
     const removed = (Array.isArray(req.body.removed) ? req.body.removed : [])
       .map((x) => {
         const id = Number(x.id != null ? x.id : x);
@@ -294,16 +321,26 @@ function mountApi(app) {
         return { id, name: line.name };
       })
       .filter(Boolean);
+    const added = (Array.isArray(req.body.added) ? req.body.added : [])
+      .map((x) => {
+        const id = Number(x.id != null ? x.id : x);
+        if (!id || inRecipe.has(id)) return null;
+        const ing = db().prepare('SELECT id, name FROM ingredients WHERE id = ?').get(id);
+        if (!ing) return null;
+        return { id: ing.id, name: ing.name, quantity: 1 };
+      })
+      .filter(Boolean);
     const removedJson = JSON.stringify(removed);
-    const stock = inventory.checkStock(product.id, quantity, removedJson);
+    const addedJson = JSON.stringify(added);
+    const stock = inventory.checkStock(product.id, quantity, removedJson, addedJson);
     const block = getSetting('block_on_no_stock', '0') === '1';
     if (!stock.ok && block) {
       return res.status(409).json({ error: 'No alcanza el ingrediente', shortages: stock.shortages });
     }
     const info = db().prepare(`
-      INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity, notes, created_by, removed_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(order.id, product.id, product.name, product.price, quantity, notes, req.user.id, removedJson);
+      INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity, notes, created_by, removed_json, added_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(order.id, product.id, product.name, product.price, quantity, notes, req.user.id, removedJson, addedJson);
     logChange(info.lastInsertRowid, req.user.id, 'add', { quantity, notes });
     syncOrderStatus(order.id);
     refreshTableStatus(order.table_id);
@@ -323,7 +360,7 @@ function mountApi(app) {
     const quantity = req.body.quantity != null ? Math.max(1, Number(req.body.quantity)) : item.quantity;
     const notes = req.body.notes != null ? String(req.body.notes).trim() : item.notes;
     if (quantity !== item.quantity) {
-      const stock = inventory.checkStock(item.product_id, quantity, item.removed_json);
+      const stock = inventory.checkStock(item.product_id, quantity, item.removed_json, item.added_json);
       const block = getSetting('block_on_no_stock', '0') === '1';
       if (!stock.ok && block) {
         return res.status(409).json({ error: 'No alcanza el ingrediente', shortages: stock.shortages });
@@ -693,6 +730,26 @@ function mountApi(app) {
         i.id);
     emit(req, 'inventory:changed', {});
     res.json({ ingredient: db().prepare('SELECT * FROM ingredients WHERE id = ?').get(i.id) });
+  });
+
+  app.delete('/api/ingredients/:id', requireAuth, requireRole(), (req, res) => {
+    const i = db().prepare('SELECT * FROM ingredients WHERE id = ?').get(req.params.id);
+    if (!i) return fail(res, 404, 'Ingrediente no encontrado');
+    const inRecipes = db().prepare(`
+      SELECT p.name FROM recipes r
+      JOIN products p ON p.id = r.product_id
+      WHERE r.ingredient_id = ?
+      ORDER BY p.name LIMIT 8
+    `).all(i.id);
+    if (inRecipes.length) {
+      const names = inRecipes.map((r) => r.name).join(', ');
+      return fail(res, 400, `Está en la receta de: ${names}. Quítelo de esos productos antes de borrarlo.`);
+    }
+    db().prepare('DELETE FROM inventory_movements WHERE ingredient_id = ?').run(i.id);
+    db().prepare('DELETE FROM ingredients WHERE id = ?').run(i.id);
+    emit(req, 'inventory:changed', {});
+    emit(req, 'menu:changed', {});
+    res.json({ ok: true, deleted: true, message: 'Ingrediente borrado' });
   });
 
   app.post('/api/ingredients/:id/move', requireAuth, requireRole(), (req, res) => {
@@ -1167,6 +1224,102 @@ function mountApi(app) {
 
   app.get('/api/backups', requireAuth, requireRole(), (req, res) => {
     res.json({ backups: listBackups() });
+  });
+
+  /**
+   * Deja el local listo para abrir: conserva menú (categorías, productos,
+   * ingredientes, recetas) y mesas. Borra ventas, caja, movimientos de stock,
+   * usuarios que no sean admin, y pone el inventario en 0.
+   */
+  app.post('/api/install/reset', requireAuth, requireRole(), (req, res) => {
+    const confirm = String(req.body.confirm || '').trim().toUpperCase();
+    if (confirm !== 'INSTALAR') {
+      return fail(res, 400, 'Escriba INSTALAR para confirmar el reinicio');
+    }
+    const resetStock = req.body.reset_stock !== false && req.body.reset_stock !== 0 && req.body.reset_stock !== '0';
+    let backup = null;
+    try {
+      backup = saveBackup('pre-install-reset');
+    } catch (e) {
+      console.error('backup before install reset', e);
+    }
+
+    const summary = withTx(() => {
+      const counts = {
+        payments: db().prepare('SELECT COUNT(*) AS n FROM payments').get().n,
+        invoices: db().prepare('SELECT COUNT(*) AS n FROM invoices').get().n,
+        cash_moves: db().prepare('SELECT COUNT(*) AS n FROM cash_movements').get().n,
+        cash_registers: db().prepare('SELECT COUNT(*) AS n FROM cash_registers').get().n,
+        item_changes: db().prepare('SELECT COUNT(*) AS n FROM item_changes').get().n,
+        order_items: db().prepare('SELECT COUNT(*) AS n FROM order_items').get().n,
+        orders: db().prepare('SELECT COUNT(*) AS n FROM orders').get().n,
+        inv_moves: db().prepare('SELECT COUNT(*) AS n FROM inventory_movements').get().n,
+        users_removed: 0
+      };
+
+      db().prepare('DELETE FROM payments').run();
+      db().prepare('DELETE FROM cash_movements').run();
+      db().prepare('DELETE FROM invoices').run();
+      db().prepare('DELETE FROM item_changes').run();
+      db().prepare('DELETE FROM order_items').run();
+      db().prepare('DELETE FROM orders').run();
+      db().prepare('DELETE FROM cash_registers').run();
+      db().prepare('DELETE FROM inventory_movements').run();
+
+      const removed = db().prepare("DELETE FROM users WHERE role != 'admin'").run();
+      counts.users_removed = removed.changes || 0;
+
+      let admins = db().prepare("SELECT id FROM users WHERE role = 'admin' AND active = 1").all();
+      if (!admins.length) {
+        const hash = bcrypt.hashSync('admin123', 10);
+        const info = db().prepare(
+          'INSERT INTO users (name, username, password_hash, role) VALUES (?, ?, ?, ?)'
+        ).run('Administrador', 'admin', hash, 'admin');
+        admins = [{ id: info.lastInsertRowid }];
+      }
+
+      db().prepare(`
+        UPDATE restaurant_tables
+        SET status = 'free', joined_to_id = NULL
+      `).run();
+
+      if (resetStock) {
+        db().prepare('UPDATE ingredients SET stock = 0').run();
+      }
+
+      return {
+        counts,
+        admin_id: admins[0].id,
+        products: db().prepare('SELECT COUNT(*) AS n FROM products').get().n,
+        ingredients: db().prepare('SELECT COUNT(*) AS n FROM ingredients').get().n,
+        categories: db().prepare('SELECT COUNT(*) AS n FROM categories').get().n,
+        tables: db().prepare('SELECT COUNT(*) AS n FROM restaurant_tables').get().n,
+        reset_stock: resetStock
+      };
+    });
+
+    if (req.user.role !== 'admin') {
+      req.session.destroy(() => {});
+    } else {
+      const still = db().prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.user.id);
+      if (!still || still.role !== 'admin') {
+        req.session.destroy(() => {});
+      } else {
+        req.session.user = publicUser(still);
+      }
+    }
+
+    emit(req, 'tables:changed', {});
+    emit(req, 'orders:changed', {});
+    emit(req, 'kitchen:changed', {});
+    emit(req, 'menu:changed', {});
+
+    res.json({
+      ok: true,
+      backup: backup?.filename || null,
+      ...summary,
+      message: 'Listo para instalar. Quedó el menú y solo usuarios admin. Cree meseros, cocina y cajero desde Personal.'
+    });
   });
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));

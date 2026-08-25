@@ -1,5 +1,5 @@
 import { api, money, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor } from './api.js';
-import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js';
+import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=39';
 
 const root = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
@@ -19,7 +19,7 @@ const state = {
   movements: [],
   kitchen: [],
   station: 'all',
-  categoryId: 'all',
+  categoryId: null,
   cash: null,
   cashHistory: [],
   invoices: [],
@@ -30,11 +30,13 @@ const state = {
   to: today(),
   joinFrom: null,
   transferFrom: null,
+  floorEdit: false,
   socket: null,
   live: false,
   infoName: 'JR Burger',
   lanUrls: [],
-  moreNav: false
+  moreNav: false,
+  ticketOpen: false
 };
 
 function toast(msg, err = false) {
@@ -73,6 +75,21 @@ function removedText(it) {
   } catch {
     return '';
   }
+}
+
+function addedText(it) {
+  try {
+    const list = JSON.parse(it.added_json || '[]');
+    if (!Array.isArray(list) || !list.length) return '';
+    const names = list.map((x) => (x && x.name) || x).filter(Boolean);
+    return names.length ? 'Extra ' + names.join(', ') : '';
+  } catch {
+    return '';
+  }
+}
+
+function modsText(it) {
+  return [removedText(it), addedText(it)].filter(Boolean).join(' · ');
 }
 
 function minutesAgo(iso) {
@@ -151,7 +168,10 @@ function paintLive() {
 
 async function loadView(silent = false) {
   const { view, params } = parseHash();
-  if (state.view !== view) state.moreNav = false;
+  if (state.view !== view) {
+    state.moreNav = false;
+    if (view !== 'comanda') state.ticketOpen = false;
+  }
   state.view = view;
   state.params = params;
   if (!state.user && view !== 'login') { go('login'); return; }
@@ -163,14 +183,18 @@ async function loadView(silent = false) {
       state.alerts = me.alerts || [];
       state.settings = me.settings;
     } else if (view === 'comanda') {
-      const [orderWrap, productsWrap, cats] = await Promise.all([
+      const prevId = state.order?.id;
+      const [orderWrap, productsWrap, cats, ings] = await Promise.all([
         api('/api/orders/' + params.id),
         api('/api/products'),
-        api('/api/categories')
+        api('/api/categories'),
+        api('/api/ingredients')
       ]);
       state.order = orderWrap.order;
       state.products = productsWrap.products.filter((p) => p.active);
       state.categories = cats.categories;
+      state.ingredients = ings.ingredients || [];
+      if (String(prevId) !== String(state.order?.id)) state.categoryId = null;
     } else if (view === 'cocina') {
       state.kitchen = (await api('/api/orders?status=kitchen')).orders;
     } else if (view === 'facturar') {
@@ -247,9 +271,6 @@ function navBtn(i) {
       ${ico(i.ico)}<span>${i.label}</span>
     </button>`;
 }
-      ${ico(i.ico)}<span>${i.label}</span>
-    </button>`;
-}
 
 function showMoreNav() {
   const extra = navFor(state.user.role).slice(4);
@@ -288,7 +309,7 @@ function render() {
       <div class="more-nav-grid">${moreItems.map(navBtn).join('')}</div>
     </div>` : '';
   root.innerHTML = `
-    <div class="app-shell">
+    <div class="app-shell${state.view === 'comanda' ? ' is-pos' : ''}">
       <nav class="sidenav">
         <div class="sidenav-brand">
           <div class="logo-plate">
@@ -318,6 +339,8 @@ function render() {
     </div>`;
   paintLive();
   bind();
+  if (state.view === 'mesas') bindFloorMap();
+  bindDataPanels();
 }
 
 function lanAccessCard() {
@@ -371,23 +394,31 @@ function viewHtml() {
 }
 
 function pageHead(title, lede, actions = '') {
-  return `<div class="page-head${state.view === 'comanda' ? ' order-head' : ''}">
+  return `<div class="page-head">
     <div><h1>${title}</h1>${lede ? `<p class="lede">${lede}</p>` : ''}</div>
     ${actions ? `<div class="page-actions">${actions}</div>` : ''}
   </div>`;
 }
 
 function mesasView() {
+  const picking = !!(state.joinFrom || state.transferFrom);
+  if (picking) state.floorEdit = false;
   const mode = state.joinFrom ? 'Toque la otra mesa para juntarlas.' :
-    state.transferFrom ? 'Toque la mesa a la que quiere pasar el pedido.' : 'Toque una mesa para tomar o ver el pedido.';
+    state.transferFrom ? 'Toque la mesa a la que quiere pasar el pedido.' :
+    state.floorEdit ? 'Arrastre las mesas a su sitio en el local.' :
+    'Toque una mesa para tomar o ver el pedido.';
   const counts = {
     free: state.tables.filter((t) => t.status === 'free' && !t.joined_to_id).length,
     occupied: state.tables.filter((t) => t.status === 'occupied' || t.joined_to_id).length,
     waiting_payment: state.tables.filter((t) => t.status === 'waiting_payment').length,
     reserved: state.tables.filter((t) => t.status === 'reserved').length
   };
+  const editBtn = picking
+    ? ''
+    : `<button type="button" class="btn ${state.floorEdit ? 'primary' : 'ghost'}" data-act="toggle-floor-edit">${state.floorEdit ? 'Listo' : 'Editar plano'}</button>`;
+  const placed = floorPositions(state.tables);
   return `
-    ${pageHead('Mesas', mode)}
+    ${pageHead('Mesas', mode, editBtn)}
     ${(state.alerts || []).length ? `<div class="alert">Se está acabando: ${state.alerts.map((a) => esc(a.name)).join(', ')}</div>` : ''}
     <div class="legend">
       <span><i class="pip free"></i> Libre (${counts.free})</span>
@@ -395,12 +426,48 @@ function mesasView() {
       <span><i class="pip wait"></i> Por cobrar (${counts.waiting_payment})</span>
       <span><i class="pip reserved"></i> Reservada (${counts.reserved})</span>
     </div>
-    <div class="grid tables-grid ${state.joinFrom || state.transferFrom ? 'pick-mode' : ''}">
-      ${state.tables.map(tableCard).join('')}
+    <div class="floor-map ${state.floorEdit ? 'is-editing' : ''} ${picking ? 'pick-mode' : ''}" id="floor-map">
+      <div class="floor-label" aria-hidden="true">Salón</div>
+      ${placed.map((t) => floorTable(t)).join('')}
     </div>
     <div class="actions-fab">
-      <button class="btn ghost" data-act="cancel-mode" ${state.joinFrom || state.transferFrom ? '' : 'hidden'}>Cancelar</button>
+      <button class="btn ghost" data-act="cancel-mode" ${picking ? '' : 'hidden'}>Cancelar</button>
     </div>`;
+}
+
+function floorPositions(tables) {
+  const cols = 4;
+  return (tables || []).map((t, i) => {
+    let x = t.pos_x != null ? Number(t.pos_x) : NaN;
+    let y = t.pos_y != null ? Number(t.pos_y) : NaN;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      x = 14 + col * 24;
+      y = 18 + (row % 5) * 16;
+    }
+    return { ...t, _x: Math.min(92, Math.max(8, x)), _y: Math.min(92, Math.max(8, y)) };
+  });
+}
+
+function floorTable(t) {
+  const joined = t.joined_to_id;
+  const status = joined ? 'occupied' : t.status;
+  const label = joined ? `Junto ${esc(t.joined_to_name || '')}` : TABLE_STATUS[t.status];
+  const amt = t.order ? money(t.order.subtotal) : '';
+  const meta = t.order ? `${t.order.item_count}·` : `${t.seats}p`;
+  const act = state.floorEdit ? '' : `data-act="table" data-id="${t.id}"`;
+  const tag = state.floorEdit ? 'div' : 'button';
+  const type = state.floorEdit ? '' : 'type="button"';
+  return `
+    <${tag} ${type} class="floor-table ${status} ${joined ? 'joined' : ''} ${t.order ? 'has-order' : ''}"
+      data-table-id="${t.id}" ${act}
+      style="left:${t._x}%;top:${t._y}%;"
+      title="${esc(t.name)} · ${label}">
+      <span class="floor-table-name">${esc(t.name)}</span>
+      <span class="floor-table-meta">${meta}${amt ? ` ${amt}` : ''}</span>
+      <span class="badge ${status}">${label}</span>
+    </${tag}>`;
 }
 
 function tableCard(t) {
@@ -419,71 +486,128 @@ function tableCard(t) {
     </button>`;
 }
 
+function catKey(name) {
+  const n = String(name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (/hamburg/.test(n)) return 'hamburguesa';
+  if (/perro|hot.?dog/.test(n)) return 'perro';
+  if (/arepa/.test(n)) return 'arepa';
+  if (/carne/.test(n)) return 'carne';
+  if (/especial|toston|alitas|costill/.test(n)) return 'especial';
+  if (/salchi|papa/.test(n)) return 'salchipapa';
+  if (/mazorc/.test(n)) return 'mazorca';
+  if (/adicion|extra|porcion/.test(n)) return 'adicional';
+  if (/bebida|jugo|gaseosa|cerveza|agua/.test(n)) return 'bebida';
+  return 'menu';
+}
+
+function catIcon(name) {
+  const key = catKey(name);
+  return `<img class="cat-ico cat-ico-${key}" src="/icons/cats/${key}.png?v=34" alt="" width="64" height="64" decoding="async" draggable="false" />`;
+}
+
 function orderView() {
   const o = state.order;
   if (!o) return '<p>No se encontró el pedido</p>';
   const active = o.items.filter((i) => i.status !== 'cancelled');
-  const cats = [{ id: 'all', name: 'Todo' }, ...state.categories];
-  const products = state.products.filter((p) => state.categoryId === 'all' || String(p.category_id) === String(state.categoryId));
+  const browsing = state.categoryId == null || state.categoryId === '';
+  const cat = browsing ? null : state.categories.find((c) => String(c.id) === String(state.categoryId));
+  const products = browsing
+    ? []
+    : state.products.filter((p) => String(p.category_id) === String(state.categoryId));
   const unsent = active.filter((i) => !i.sent).length;
+  const billed = ['billed', 'cancelled'].includes(o.status);
+  const backAct = browsing
+    ? 'data-act="nav" data-view="mesas"'
+    : 'data-act="cat-home"';
+  const title = browsing ? esc(o.table_name) : esc(cat?.name || 'Grupo');
+  const subtitle = browsing
+    ? `#${o.id} · ${esc(o.waiter_name)} · elija un grupo`
+    : `#${o.id} · ${products.length} producto${products.length === 1 ? '' : 's'}`;
+
+  const body = browsing
+    ? `<div class="pos-groups">
+        ${(state.categories || []).map((c) => {
+          const count = state.products.filter((p) => String(p.category_id) === String(c.id)).length;
+          return `
+            <button type="button" class="pos-group pos-group-${catKey(c.name)}" data-act="cat" data-id="${c.id}">
+              <span class="pos-group-ico" aria-hidden="true">${catIcon(c.name)}</span>
+              <span class="pos-group-copy">
+                <span class="pos-group-name">${esc(c.name)}</span>
+                <span class="pos-group-meta">${count} producto${count === 1 ? '' : 's'}</span>
+              </span>
+              <span class="pos-group-go">›</span>
+            </button>`;
+        }).join('') || '<div class="empty">No hay grupos en el menú</div>'}
+      </div>`
+    : `<div class="pos-menu">
+        ${products.map((p) => `
+          <button type="button" class="pos-item" data-act="add-prod" data-id="${p.id}">
+            <span class="pos-item-name">${esc(p.name)}</span>
+            <span class="pos-item-price">${money(p.price)}</span>
+          </button>
+        `).join('') || '<div class="empty">No hay productos en este grupo</div>'}
+      </div>`;
+
   return `
-    ${pageHead(esc(o.table_name), `Pedido #${o.id} · ${esc(o.waiter_name)}`, `<button class="btn ghost" data-act="nav" data-view="mesas">Mesas</button>`)}
-    <div class="order-layout">
-      <div class="order-menu">
-        <div class="tabs">
-          ${cats.map((c) => `<button class="${String(state.categoryId) === String(c.id) ? 'on' : ''}" data-act="cat" data-id="${c.id}">${esc(c.name)}</button>`).join('')}
-        </div>
-        <div class="grid menu-grid">
-          ${products.map((p) => `
-            <button class="card prod" data-act="add-prod" data-id="${p.id}">
-              <span class="prod-cat">${esc(p.category_name || '')}</span>
-              <div class="name">${esc(p.name)}</div>
-              <div class="price">${money(p.price)}</div>
-            </button>`).join('') || '<div class="empty">No hay productos en este grupo</div>'}
-        </div>
-      </div>
-      <div class="card ticket">
-        <div class="ticket-head">Pedido</div>
-        ${o.items.map((it) => `
-          <div class="ticket-line ${it.status === 'cancelled' ? 'cancelled' : ''}">
-            <div>
-              <div class="name">${it.quantity}× ${esc(it.product_name)}</div>
-              ${it.notes ? `<div class="notes">${esc(it.notes)}</div>` : ''}
-              ${removedText(it) ? `<div class="notes">${esc(removedText(it))}</div>` : ''}
-              <div class="small muted">${ITEM_STATUS[it.status]}${it.sent ? ' · ya fue a cocina' : ' · aún no se envía'}</div>
-            </div>
-            <div>
-              <div class="line-amt">${money(it.quantity * it.unit_price)}</div>
-              ${it.status !== 'cancelled' && !['billed'].includes(o.status) ? `
-                <div class="qty" style="margin-top:6px">
-                  <button data-act="qty" data-id="${it.id}" data-d="-1">−</button>
-                  <button data-act="qty" data-id="${it.id}" data-d="1">+</button>
-                  <button data-act="note-item" data-id="${it.id}" title="Nota">✎</button>
-                  <button data-act="cancel-item" data-id="${it.id}" title="Quitar">✕</button>
-                </div>` : ''}
-            </div>
-          </div>`).join('') || '<div class="empty">Toque productos para armar el pedido</div>'}
-        <div class="ticket-total"><span>Total</span><b>${money(o.subtotal)}</b></div>
-        <div class="actions-fab ticket-actions">
-          <button class="btn primary block lg" data-act="send-order" ${unsent ? '' : 'disabled'}>Enviar a cocina (${unsent})</button>
-          <button class="btn gold block" data-act="wait-pay">Pedir cuenta</button>
-          <div class="row">
-            <button class="btn ghost" data-act="join-mode">Juntar mesas</button>
-            <button class="btn ghost" data-act="transfer-mode">Pasar a otra mesa</button>
+    <div class="pos">
+      <div class="pos-main">
+        <header class="pos-bar">
+          <button type="button" class="pos-back" ${backAct} aria-label="Volver">←</button>
+          <div class="pos-bar-copy">
+            <h1>${title}</h1>
+            <p>${subtitle}</p>
           </div>
-          ${['billed', 'cancelled'].includes(o.status) ? '' : `
-            <button class="btn danger block" data-act="cancel-order">${active.length ? 'Cancelar cuenta' : 'Liberar mesa'}</button>`}
+        </header>
+        ${body}
+      </div>
+      <aside class="pos-ticket${state.ticketOpen ? ' is-open' : ''}">
+        <div class="pos-ticket-top">
+          <h2>Pedido</h2>
+          <button type="button" class="pos-ticket-close" data-act="toggle-ticket">Cerrar</button>
         </div>
-      </div>
+        <div class="pos-ticket-lines">
+          ${o.items.map((it) => `
+            <div class="pos-line ${it.status === 'cancelled' ? 'cancelled' : ''}">
+              <div class="pos-line-main">
+                <div class="pos-line-name">${it.quantity}× ${esc(it.product_name)}</div>
+                ${it.notes ? `<div class="pos-line-note">${esc(it.notes)}</div>` : ''}
+                ${modsText(it) ? `<div class="pos-line-note">${esc(modsText(it))}</div>` : ''}
+                <div class="pos-line-st">${ITEM_STATUS[it.status]}${it.sent ? ' · en cocina' : ' · sin enviar'}</div>
+              </div>
+              <div class="pos-line-amt">${money(it.quantity * it.unit_price)}</div>
+              ${it.status !== 'cancelled' && !billed ? `
+                <div class="pos-line-qty">
+                  <button type="button" data-act="qty" data-id="${it.id}" data-d="-1">−</button>
+                  <span>${it.quantity}</span>
+                  <button type="button" data-act="qty" data-id="${it.id}" data-d="1">+</button>
+                  <button type="button" class="ghost" data-act="note-item" data-id="${it.id}">Nota</button>
+                  <button type="button" class="ghost danger-text" data-act="cancel-item" data-id="${it.id}">Quitar</button>
+                </div>` : ''}
+            </div>`).join('') || '<div class="empty">Toque un producto para agregarlo</div>'}
+        </div>
+        <div class="pos-ticket-foot">
+          <div class="pos-total"><span>Total</span><b>${money(o.subtotal)}</b></div>
+          <button type="button" class="btn primary block lg" data-act="send-order" ${unsent ? '' : 'disabled'}>Enviar a cocina (${unsent})</button>
+          <button type="button" class="btn gold block" data-act="wait-pay">Pedir cuenta</button>
+          <div class="pos-ticket-extra">
+            <button type="button" class="btn ghost" data-act="join-mode">Juntar</button>
+            <button type="button" class="btn ghost" data-act="transfer-mode">Pasar</button>
+          </div>
+          ${billed ? '' : `<button type="button" class="btn danger block" data-act="cancel-order">${active.length ? 'Cancelar cuenta' : 'Liberar mesa'}</button>`}
+        </div>
+      </aside>
     </div>
-    ${['billed', 'cancelled'].includes(o.status) ? '' : `
-    <div class="order-dock">
-      <div class="order-dock-sum">
-        <span class="small muted">${active.length} prod.</span>
+    ${state.ticketOpen ? '<div class="pos-backdrop" data-act="toggle-ticket"></div>' : ''}
+    ${billed ? '' : `
+    <div class="pos-dock">
+      <button type="button" class="pos-dock-cart" data-act="toggle-ticket">
+        <span>${active.length} prod.</span>
         <b>${money(o.subtotal)}</b>
-      </div>
-      <button class="btn gold" data-act="wait-pay">Cuenta</button>
-      <button class="btn primary" data-act="send-order" ${unsent ? '' : 'disabled'}>Enviar${unsent ? ` (${unsent})` : ''}</button>
+      </button>
+      <button type="button" class="btn primary" data-act="send-order" ${unsent ? '' : 'disabled'}>Enviar${unsent ? ` (${unsent})` : ''}</button>
     </div>`}`;
 }
 
@@ -526,7 +650,7 @@ function kitchenView() {
                 <span class="badge ${it.status}">${ITEM_STATUS[it.status]}</span>
               </div>
               ${it.notes ? `<div class="notes">${esc(it.notes)}</div>` : ''}
-              ${removedText(it) ? `<div class="notes">${esc(removedText(it))}</div>` : ''}
+              ${modsText(it) ? `<div class="notes">${esc(modsText(it))}</div>` : ''}
               <div class="kds-actions">
                 <button class="btn" data-act="item-status" data-oid="${o.id}" data-id="${it.id}" data-st="preparing">Cocinando</button>
                 <button class="btn sage" data-act="item-status" data-oid="${o.id}" data-id="${it.id}" data-st="ready">Listo</button>
@@ -565,7 +689,7 @@ function billForm(o, openCash) {
     <div class="bill-grid">
       <div class="card">
         <div class="ticket-head">Lo que pidieron</div>
-        ${active.map((i) => `<div class="ticket-line"><span>${i.quantity}× ${esc(i.product_name)}${removedText(i) ? `<div class="notes">${esc(removedText(i))}</div>` : ''}</span><span class="line-amt">${money(i.quantity * i.unit_price)}</span></div>`).join('')}
+        ${active.map((i) => `<div class="ticket-line"><span>${i.quantity}× ${esc(i.product_name)}${modsText(i) ? `<div class="notes">${esc(modsText(i))}</div>` : ''}</span><span class="line-amt">${money(i.quantity * i.unit_price)}</span></div>`).join('')}
         <div class="between muted"><span>Suma</span><span>${money(subtotal)}</span></div>
         ${taxRate ? `<div class="between muted"><span>IVA ${taxRate}%${included ? ' (incluido)' : ''}</span><span>${money(tax)}</span></div>` : ''}
         <div class="ticket-total"><span>Total</span><b>${money(total)}</b></div>
@@ -651,81 +775,99 @@ function cashView() {
       </form>
     </div>
     <h3 class="section-title">Movimientos de este turno</h3>
-    <div class="table-wrap card">
-      <table class="data">
-        <thead><tr><th>Tipo</th><th>Medio</th><th>Valor</th><th>Nota</th></tr></thead>
-        <tbody>
-          ${moves.map((m) => `
-            <tr>
-              <td>${MOVE_TYPE[m.type] || m.type}</td>
-              <td>${PAY[m.method] || m.method || '—'}</td>
-              <td>${money(m.amount)}</td>
-              <td>${esc(m.description || '')}</td>
-            </tr>`).join('') || '<tr><td colspan="4">Todavía no hay movimientos</td></tr>'}
-        </tbody>
-      </table>
-    </div>
+    ${dataPanel({
+      id: 'cash-moves',
+      searchPlaceholder: 'Buscar movimiento…',
+      pageSize: 10,
+      head: '<tr><th>Tipo</th><th>Medio</th><th>Valor</th><th>Nota</th></tr>',
+      rows: moves.map((m) => ({
+        search: `${m.type} ${m.method || ''} ${m.description || ''} ${m.amount}`,
+        html: `<tr>
+          <td>${MOVE_TYPE[m.type] || m.type}</td>
+          <td>${PAY[m.method] || m.method || '—'}</td>
+          <td>${money(m.amount)}</td>
+          <td>${esc(m.description || '')}</td>
+        </tr>`
+      })),
+      empty: 'Todavía no hay movimientos'
+    })}
     ${salonResetCard(salon)}
     ${cashHistory()}`;
 }
 
 function cashHistory() {
+  const rows = (state.cashHistory || []).map((h) => ({
+    search: `${h.opened_at} ${h.closed_at || ''} ${h.opened_by_name || ''}`,
+    html: `<tr>
+      <td>${esc(h.opened_at)}<div class="small muted">${esc(h.opened_by_name)}</div></td>
+      <td>${esc(h.closed_at || 'Abierta')}</td>
+      <td>${money(h.opening_amount)}</td>
+      <td>${h.closing_counted != null ? money(h.closing_counted) : '—'}</td>
+      <td>${cashDiffLabel(h.difference)}</td>
+      <td><button class="btn ghost" type="button" data-act="print-cash" data-id="${h.id}">Ticket</button></td>
+    </tr>`
+  }));
   return `
     <h3 class="section-title">Cierres anteriores</h3>
-    <div class="table-wrap card">
-      <table class="data">
-        <thead><tr><th>Se abrió</th><th>Se cerró</th><th>Al abrir</th><th>Al contar</th><th>Diferencia</th><th></th></tr></thead>
-        <tbody>
-          ${(state.cashHistory || []).map((h) => `
-            <tr>
-              <td>${esc(h.opened_at)}<div class="small muted">${esc(h.opened_by_name)}</div></td>
-              <td>${esc(h.closed_at || 'Abierta')}</td>
-              <td>${money(h.opening_amount)}</td>
-              <td>${h.closing_counted != null ? money(h.closing_counted) : '—'}</td>
-              <td>${cashDiffLabel(h.difference)}</td>
-              <td><button class="btn ghost" type="button" data-act="print-cash" data-id="${h.id}">Ticket</button></td>
-            </tr>`).join('') || '<tr><td colspan="6">Sin cierres</td></tr>'}
-        </tbody>
-      </table>
-    </div>`;
+    ${dataPanel({
+      id: 'cash-history',
+      searchPlaceholder: 'Buscar por fecha o cajero…',
+      pageSize: 8,
+      head: '<tr><th>Se abrió</th><th>Se cerró</th><th>Al abrir</th><th>Al contar</th><th>Diferencia</th><th></th></tr>',
+      rows,
+      empty: 'Sin cierres'
+    })}`;
 }
 
 function inventoryView() {
-  return `
-    ${pageHead('Inventario', 'Aquí se ve qué hay en cocina. Al vender, se descuenta solo.', `<button class="btn primary" data-act="new-ing">Agregar ingrediente</button>`)}
-    ${(state.alerts || []).length ? `<div class="alert">Se está acabando: ${state.alerts.map((a) => `${esc(a.name)} (${a.stock} ${esc(a.unit)})`).join(' · ')}</div>` : ''}
-    <div class="grid catalog">
-      ${state.ingredients.map((i) => {
-        const low = Number(i.stock) <= Number(i.min_stock);
-        return `<div class="card stock-card ${low ? 'low' : ''}">
-          <div class="between"><b>${esc(i.name)}</b>          <span class="badge ${low ? 'occupied' : 'free'}">${low ? 'Poco' : 'Bien'}</span></div>
+  const cards = state.ingredients.map((i) => {
+    const low = Number(i.stock) <= Number(i.min_stock);
+    return {
+      search: `${i.name} ${i.unit}`,
+      html: `<div class="card stock-card ${low ? 'low' : ''}" data-card>
+          <div class="between"><b>${esc(i.name)}</b><span class="badge ${low ? 'occupied' : 'free'}">${low ? 'Poco' : 'Bien'}</span></div>
           <div class="stock-num">${i.stock} <small>${esc(i.unit)}</small></div>
           <div class="small muted">Avisar cuando queden ${i.min_stock}</div>
           <div class="row" style="margin-top:12px">
             <button class="btn" data-act="move-ing" data-id="${i.id}" data-type="purchase">Reponer</button>
             <button class="btn ghost" data-act="move-ing" data-id="${i.id}" data-type="adjustment">Corregir</button>
             <button class="btn ghost" data-act="edit-ing" data-id="${i.id}">Editar</button>
+            <button class="btn danger" data-act="del-ing" data-id="${i.id}">Borrar</button>
           </div>
-        </div>`;
-      }).join('')}
-    </div>
+        </div>`
+    };
+  });
+  const moves = (state.movements || []).map((m) => ({
+    search: `${m.created_at} ${m.ingredient_name} ${m.type} ${m.reason || ''} ${m.user_name || ''}`,
+    html: `<tr>
+      <td>${esc(m.created_at)}</td>
+      <td>${esc(m.ingredient_name)}</td>
+      <td>${esc(MOVE_TYPE[m.type] || m.type)}</td>
+      <td>${m.quantity}</td>
+      <td>${m.stock_after}</td>
+      <td>${esc(m.reason || '')} <span class="small muted">${esc(m.user_name || '')}</span></td>
+    </tr>`
+  }));
+  return `
+    ${pageHead('Inventario', 'Aquí se ve qué hay en cocina. Al vender, se descuenta solo.', `<button class="btn primary" data-act="new-ing">Agregar ingrediente</button>`)}
+    ${(state.alerts || []).length ? `<div class="alert">Se está acabando: ${state.alerts.map((a) => `${esc(a.name)} (${a.stock} ${esc(a.unit)})`).join(' · ')}</div>` : ''}
+    ${dataPanel({
+      id: 'inv-cards',
+      mode: 'cards',
+      searchPlaceholder: 'Buscar ingrediente…',
+      pageSize: 12,
+      rows: cards,
+      empty: 'No hay ingredientes'
+    })}
     <h3 class="section-title">Qué se ha movido</h3>
-    <div class="table-wrap card">
-      <table class="data">
-        <thead><tr><th>Fecha</th><th>Ingrediente</th><th>Qué pasó</th><th>Cantidad</th><th>Quedó</th><th>Nota</th></tr></thead>
-        <tbody>
-          ${state.movements.slice(0, 80).map((m) => `
-            <tr>
-              <td>${esc(m.created_at)}</td>
-              <td>${esc(m.ingredient_name)}</td>
-              <td>${esc(MOVE_TYPE[m.type] || m.type)}</td>
-              <td>${m.quantity}</td>
-              <td>${m.stock_after}</td>
-              <td>${esc(m.reason || '')} <span class="small muted">${esc(m.user_name || '')}</span></td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-    </div>`;
+    ${dataPanel({
+      id: 'inv-moves',
+      searchPlaceholder: 'Buscar movimiento…',
+      pageSize: 10,
+      head: '<tr><th>Fecha</th><th>Ingrediente</th><th>Qué pasó</th><th>Cantidad</th><th>Quedó</th><th>Nota</th></tr>',
+      rows: moves,
+      empty: 'Sin movimientos'
+    })}`;
 }
 
 function productOnSale(p) {
@@ -756,6 +898,13 @@ function productsView() {
           </div>
         </div>`;
   }).join('');
+  const toRows = (list) => list.map((p) => {
+    const cat = p.category_name || 'Sin grupo';
+    return {
+      search: `${p.name} ${cat} ${p.station || ''}`,
+      html: cards([p])
+    };
+  });
   return `
     ${pageHead('Menú', 'Lo que se vende. En cada producto se anota qué ingredientes usa.', `
       <button class="btn primary" data-act="new-prod">Agregar producto</button>
@@ -768,16 +917,28 @@ function productsView() {
           <button type="button" class="linkish danger-text" data-act="del-cat" data-id="${c.id}" title="Borrar grupo">Borrar</button>
         </span>`).join('') || '<span class="muted small">Todavía no hay grupos</span>'}
     </div>
-    <div class="grid catalog">${cards(visible)}</div>
-    ${hidden.length ? `<h3 class="section-title">Ocultos (${hidden.length})</h3><div class="grid catalog">${cards(hidden)}</div>` : ''}`;
+    ${dataPanel({
+      id: 'prod-visible',
+      mode: 'cards',
+      searchPlaceholder: 'Buscar producto o grupo…',
+      pageSize: 12,
+      rows: toRows(visible),
+      empty: 'No hay productos a la venta'
+    })}
+    ${hidden.length ? `<h3 class="section-title">Ocultos (${hidden.length})</h3>${dataPanel({
+      id: 'prod-hidden',
+      mode: 'cards',
+      searchPlaceholder: 'Buscar oculto…',
+      pageSize: 8,
+      rows: toRows(hidden),
+      empty: 'Sin ocultos'
+    })}` : ''}`;
 }
 
 function usersView() {
-  return `
-    ${pageHead('Personal', 'Cada persona entra con su usuario. El cargo puede ser Jefe, Mesero, Cocina o Cajero.', `<button class="btn primary" data-act="new-user">Agregar persona</button>`)}
-    <div class="grid catalog">
-      ${state.users.map((u) => `
-        <div class="card user-card">
+  const rows = (state.users || []).map((u) => ({
+    search: `${u.name} ${u.username} ${ROLE[u.role] || u.role}`,
+    html: `<div class="card user-card">
           <div class="avatar">${esc((u.name || '?').slice(0, 1))}</div>
           <div>
             <b>${esc(u.name)}</b>
@@ -785,8 +946,18 @@ function usersView() {
             <span class="badge ${u.active ? 'free' : 'reserved'}">${u.active ? 'Puede entrar' : 'Bloqueado'}</span>
           </div>
           <button class="btn" data-act="edit-user" data-id="${u.id}">Editar</button>
-        </div>`).join('')}
-    </div>`;
+        </div>`
+  }));
+  return `
+    ${pageHead('Personal', 'Cada persona entra con su usuario. El cargo puede ser Jefe, Mesero, Cocina o Cajero.', `<button class="btn primary" data-act="new-user">Agregar persona</button>`)}
+    ${dataPanel({
+      id: 'users-list',
+      mode: 'cards',
+      searchPlaceholder: 'Buscar persona…',
+      pageSize: 12,
+      rows,
+      empty: 'Sin personal'
+    })}`;
 }
 
 function reportsView() {
@@ -801,21 +972,55 @@ function reportsView() {
         <div class="stat"><span>Cuentas</span><b>${r.totals?.tickets || 0}</b></div>
         <div class="stat"><span>Total</span><b>${money(r.totals?.total)}</b></div>
       </div>
-      <div class="table-wrap card" style="margin-top:12px">
-        <table class="data"><thead><tr><th>Día</th><th>Cuentas</th><th>Total</th></tr></thead>
-        <tbody>${(r.daily || []).map((d) => `<tr><td>${esc(d.day)}</td><td>${d.tickets}</td><td>${money(d.total)}</td></tr>`).join('')}</tbody></table>
-      </div>
-      <h3>Cómo pagaron</h3>
-      ${(r.methods || []).map((m) => `<div class="between card" style="margin-bottom:8px"><span>${PAY[m.method] || m.method}</span><b>${money(m.total)}</b></div>`).join('')}`;
+      ${dataPanel({
+        id: 'rep-sales',
+        searchPlaceholder: 'Buscar día…',
+        pageSize: 12,
+        head: '<tr><th>Día</th><th>Cuentas</th><th>Total</th></tr>',
+        rows: (r.daily || []).map((d) => ({
+          search: String(d.day),
+          html: `<tr><td>${esc(d.day)}</td><td>${d.tickets}</td><td>${money(d.total)}</td></tr>`
+        })),
+        empty: 'Sin ventas en el rango'
+      })}
+      <h3 class="section-title">Cómo pagaron</h3>
+      ${(r.methods || []).map((m) => `<div class="between card" style="margin-bottom:8px"><span>${PAY[m.method] || m.method}</span><b>${money(m.total)}</b></div>`).join('') || '<p class="hint">Sin pagos en el rango</p>'}`;
   } else if (state.reportTab === 'products') {
-    body = `<div class="table-wrap card"><table class="data"><thead><tr><th>Producto</th><th>Cuántos</th><th>Total</th></tr></thead>
-      <tbody>${(r.products || []).map((p) => `<tr><td>${esc(p.product_name)}</td><td>${p.qty}</td><td>${money(p.total)}</td></tr>`).join('')}</tbody></table></div>`;
+    body = dataPanel({
+      id: 'rep-products',
+      searchPlaceholder: 'Buscar producto…',
+      pageSize: 12,
+      head: '<tr><th>Producto</th><th>Cuántos</th><th>Total</th></tr>',
+      rows: (r.products || []).map((p) => ({
+        search: p.product_name || p.name || '',
+        html: `<tr><td>${esc(p.product_name || p.name)}</td><td>${p.qty}</td><td>${money(p.total)}</td></tr>`
+      })),
+      empty: 'Sin datos'
+    });
   } else if (state.reportTab === 'ingredients') {
-    body = `<div class="table-wrap card"><table class="data"><thead><tr><th>Ingrediente</th><th>Se usó</th></tr></thead>
-      <tbody>${(r.ingredients || []).map((i) => `<tr><td>${esc(i.name)}</td><td>${i.consumed} ${esc(i.unit)}</td></tr>`).join('')}</tbody></table></div>`;
+    body = dataPanel({
+      id: 'rep-ings',
+      searchPlaceholder: 'Buscar ingrediente…',
+      pageSize: 12,
+      head: '<tr><th>Ingrediente</th><th>Se usó</th></tr>',
+      rows: (r.ingredients || []).map((i) => ({
+        search: i.name,
+        html: `<tr><td>${esc(i.name)}</td><td>${i.consumed} ${esc(i.unit)}</td></tr>`
+      })),
+      empty: 'Sin datos'
+    });
   } else {
-    body = `<div class="table-wrap card"><table class="data"><thead><tr><th>Mesero</th><th>Cuentas</th><th>Total</th></tr></thead>
-      <tbody>${(r.waiters || []).map((w) => `<tr><td>${esc(w.name)}</td><td>${w.tickets}</td><td>${money(w.total)}</td></tr>`).join('')}</tbody></table></div>`;
+    body = dataPanel({
+      id: 'rep-waiters',
+      searchPlaceholder: 'Buscar mesero…',
+      pageSize: 12,
+      head: '<tr><th>Mesero</th><th>Cuentas</th><th>Total</th></tr>',
+      rows: (r.waiters || []).map((w) => ({
+        search: w.name,
+        html: `<tr><td>${esc(w.name)}</td><td>${w.tickets}</td><td>${money(w.total)}</td></tr>`
+      })),
+      empty: 'Sin datos'
+    });
   }
   return `
     ${pageHead('Informes', 'Vea las ventas, lo más pedido, los ingredientes y el trabajo de cada mesero.')}
@@ -875,6 +1080,12 @@ function configView() {
       ${lanAccessCard()}
     </div>` : ''}
     ${salonResetCard({ open_orders: (state.tables || []).filter((t) => t.order).length, occupied_tables: (state.tables || []).filter((t) => t.order || t.status === 'occupied' || t.status === 'waiting_payment').length })}
+    <div class="card danger-zone" style="margin-top:14px">
+      <div class="ticket-head">Instalar en el restaurante</div>
+      <p class="hint">Borra ventas, caja, historial de inventario y usuarios que no sean admin. <b>Conserva el menú</b> (grupos, productos, ingredientes y recetas) y las mesas. El stock queda en 0 para que ustedes lo carguen.</p>
+      <p class="small muted">Antes se guarda una copia automática en backups. Luego entre como admin y cree meseros, cocina y cajero en Personal.</p>
+      <button class="btn danger" data-act="install-reset">Dejar listo para instalar</button>
+    </div>
     <div class="card" style="margin-top:14px">
       <div class="between"><div class="ticket-head" style="margin:0">Mesas</div>
         <button class="btn" data-act="new-table">Agregar mesa</button></div>
@@ -905,9 +1116,14 @@ async function onClick(e) {
   try {
     if (act === 'nav') { closeModal(); state.moreNav = false; go(el.dataset.view); }
     if (act === 'toggle-more') { state.moreNav = !state.moreNav; render(); return; }
-    if (act === 'nav-more') showMoreNav();
+    if (act === 'toggle-ticket') {
+      state.ticketOpen = !state.ticketOpen;
+      render();
+      return;
+    }
     if (act === 'logout') { await api('/api/logout', { method: 'POST' }); state.user = null; state.moreNav = false; go('login'); }
-    if (act === 'cat') { state.categoryId = el.dataset.id; render(); }
+    if (act === 'cat') { state.categoryId = el.dataset.id; render(); return; }
+    if (act === 'cat-home') { state.categoryId = null; render(); return; }
     if (act === 'table') await onTable(Number(el.dataset.id));
     if (act === 'add-prod') await addProduct(Number(el.dataset.id));
     if (act === 'qty') await changeQty(Number(el.dataset.id), Number(el.dataset.d));
@@ -917,8 +1133,16 @@ async function onClick(e) {
     if (act === 'wait-pay') await waitPay();
     if (act === 'cancel-order') await cancelOrder();
     if (act === 'reset-salon') await resetSalon();
-    if (act === 'join-mode') { state.joinFrom = state.order.table_id; go('mesas'); toast('Toque la mesa que quiere juntar'); }
-    if (act === 'transfer-mode') { state.transferFrom = state.order.table_id; go('mesas'); toast('Toque la mesa a la que pasa el pedido'); }
+    if (act === 'install-reset') await installReset();
+    if (act === 'del-ing') await deleteIngredient(Number(el.dataset.id));
+    if (act === 'toggle-floor-edit') {
+      state.floorEdit = !state.floorEdit;
+      state.joinFrom = state.transferFrom = null;
+      render();
+      return;
+    }
+    if (act === 'join-mode') { state.joinFrom = state.order.table_id; state.floorEdit = false; go('mesas'); toast('Toque la mesa que quiere juntar'); }
+    if (act === 'transfer-mode') { state.transferFrom = state.order.table_id; state.floorEdit = false; go('mesas'); toast('Toque la mesa a la que pasa el pedido'); }
     if (act === 'cancel-mode') { state.joinFrom = state.transferFrom = null; render(); }
     if (act === 'item-status') {
       await api(`/api/orders/${el.dataset.oid}/items/${el.dataset.id}/status`, { method: 'POST', body: { status: el.dataset.st } });
@@ -1082,6 +1306,7 @@ async function onChange(e) {
 }
 
 async function onTable(id) {
+  if (state.floorEdit) return;
   const t = state.tables.find((x) => x.id === id);
   if (state.joinFrom) {
     await api(`/api/tables/${state.joinFrom}/join`, { method: 'POST', body: { other_id: id } });
@@ -1129,7 +1354,8 @@ async function addProduct(id) {
   const p = state.products.find((x) => x.id === Number(id));
   const choosable = (p?.recipe || []).filter((r) => Number(r.removable) !== 0 && !/salsa|aderezo/i.test(r.ingredient_name));
   const groups = parseChoices(p);
-  if (!choosable.length && !groups.length) return addProductNow(id, [], '');
+  const canAdd = (state.ingredients || []).some((i) => !(p?.recipe || []).some((r) => Number(r.ingredient_id) === Number(i.id)));
+  if (!choosable.length && !groups.length && !canAdd) return addProductNow(id, [], [], '');
   pickProduct(p, choosable, groups);
 }
 
@@ -1154,11 +1380,12 @@ function pickProduct(p, lines, groups) {
           </label>`).join('')}
       </div>
     </fieldset>`).join('');
+  const showPicker = lines.length || (state.ingredients || []).length;
   modal(`
     <h3 style="margin-top:0">${esc(p.name)}</h3>
     <form id="ing-pick">
       ${choiceHtml}
-      ${lines.length ? burgerPickerHtml(p, lines, esc) : (groups.length ? '<p class="hint">Elija la opción y agregue al pedido.</p>' : '')}
+      ${showPicker ? burgerPickerHtml(p, lines, esc, state.ingredients || []) : (groups.length ? '<p class="hint">Elija la opción y agregue al pedido.</p>' : '')}
       <div class="field"><label>Observación (si quiere)</label>
         <input name="obs" placeholder="Ej. sin salsas, término medio…" autocomplete="off" />
       </div>
@@ -1167,7 +1394,7 @@ function pickProduct(p, lines, groups) {
   const sheet = modalRoot.querySelector('.sheet');
   if (sheet) sheet.classList.add('sheet-burger');
   const form = modalRoot.querySelector('#ing-pick');
-  if (lines.length) bindBurgerPicker(form);
+  if (showPicker) bindBurgerPicker(form);
   form.onsubmit = async (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -1182,16 +1409,21 @@ function pickProduct(p, lines, groups) {
       id: r.ingredient_id,
       name: r.ingredient_name
     }));
+    const added = [...ev.target.querySelectorAll('input[name="add"]:checked')].map((el) => {
+      const id = Number(el.value);
+      const ing = (state.ingredients || []).find((x) => Number(x.id) === id);
+      return { id, name: ing?.name || el.value, quantity: 1 };
+    });
     closeModal();
-    await addProductNow(p.id, removed, notes);
+    await addProductNow(p.id, removed, added, notes);
   };
 }
 
-async function addProductNow(id, removed, notes = '') {
+async function addProductNow(id, removed, added = [], notes = '') {
   try {
     const r = await api(`/api/orders/${state.order.id}/items`, {
       method: 'POST',
-      body: { product_id: id, quantity: 1, removed, notes }
+      body: { product_id: id, quantity: 1, removed, added, notes }
     });
     state.order = r.order;
     if (r.shortages?.length) toast('Ojo, queda poco: ' + r.shortages.map((s) => s.name).join(', '), true);
@@ -1254,6 +1486,33 @@ async function resetSalon() {
   const r = await api('/api/salon/reset', { method: 'POST', body: { reason: 'Reinicio de salón' } });
   toast(r.message || 'Salón reiniciado');
   await loadView();
+}
+
+async function installReset() {
+  if (!confirm(
+    'Esto deja el sistema como recién instalado en el restaurante.\n\n' +
+    'SE BORRA: ventas, facturas, caja, movimientos de inventario y usuarios que no sean admin.\n' +
+    'SE CONSERVA: menú (grupos, productos, ingredientes, recetas) y mesas.\n' +
+    'El stock queda en 0.\n\n' +
+    '¿Seguir?'
+  )) return;
+  const typed = prompt('Escriba INSTALAR para confirmar (en mayúsculas):');
+  if (typed == null) return;
+  if (String(typed).trim().toUpperCase() !== 'INSTALAR') {
+    toast('No se hizo el reinicio. Debía escribir INSTALAR.', true);
+    return;
+  }
+  try {
+    const r = await api('/api/install/reset', {
+      method: 'POST',
+      body: { confirm: 'INSTALAR', reset_stock: true }
+    });
+    toast(r.message || 'Sistema listo para instalar');
+    if (r.backup) toast('Copia guardada: ' + r.backup);
+    await loadView();
+  } catch (e) {
+    toast(e.message || 'No se pudo reiniciar', true);
+  }
 }
 
 async function sendOrder() {
@@ -1409,7 +1668,7 @@ function bindRecipeEditor() {
     if (pill) {
       const k = layerKind(name);
       pill.className = 'kind-pill ' + k;
-      pill.title = k === 'extra' ? 'Este nombre aún no tiene dibujo; saldrá como capa genérica' : 'Se anima en el pedido';
+      pill.title = k === 'extra' ? 'Este nombre aún no tiene icono' : 'Icono del ingrediente';
     }
     const chk = row?.querySelector('input[type="checkbox"]');
     if (chk && !chk.dataset.touched) chk.checked = !isCoreIng(name);
@@ -1477,7 +1736,7 @@ function recipeRow(r, idx) {
   return `<div class="recipe-row">
     <div class="ing-name">
       <select name="ing_${idx}" data-prev="${chosen?.id || ''}">${opts}</select>
-      <span class="kind-pill ${kind}" title="${kind === 'extra' ? 'Este nombre aún no tiene dibujo; saldrá como capa genérica' : 'Se anima en el pedido'}"></span>
+      <span class="kind-pill ${kind}" title="${kind === 'extra' ? 'Este nombre aún no tiene icono' : 'Icono del ingrediente'}"></span>
     </div>
     <input name="qty_${idx}" type="number" step="0.01" min="0" placeholder="Cuánto" value="${r.quantity ?? ''}" />
     <button type="button" class="btn ghost" data-act="del-rec" title="Quitar esta línea">✕</button>
@@ -1528,6 +1787,18 @@ async function deleteProduct(id) {
   await loadView();
 }
 
+async function deleteIngredient(id) {
+  const ing = state.ingredients.find((x) => x.id === id);
+  if (!confirm(`¿Borrar el ingrediente${ing ? ` “${ing.name}”` : ''}?\nSi está en alguna receta, primero hay que quitarlo del producto.`)) return;
+  try {
+    const r = await api('/api/ingredients/' + id, { method: 'DELETE' });
+    toast(r.message || 'Ingrediente borrado');
+    await loadView();
+  } catch (e) {
+    toast(e.message || 'No se pudo borrar', true);
+  }
+}
+
 function catForm(c) {
   modal(`<h3 style="margin-top:0">${c ? 'Editar grupo' : 'Nuevo grupo'}</h3>
     <form data-act="save-cat">
@@ -1565,6 +1836,142 @@ function tableForm(t) {
       <div class="field"><label>Cuántas sillas</label><input name="seats" type="number" min="1" value="${t?.seats ?? 4}" /></div>
       <button class="btn primary block">Guardar</button>
     </form>`);
+}
+
+function bindFloorMap() {
+  const map = root.querySelector('#floor-map');
+  if (!map || !state.floorEdit) return;
+
+  let drag = null;
+
+  const onPointerDown = (ev) => {
+    const el = ev.target.closest('.floor-table');
+    if (!el || !map.contains(el)) return;
+    ev.preventDefault();
+    const id = Number(el.dataset.tableId);
+    const rect = map.getBoundingClientRect();
+    drag = {
+      el,
+      id,
+      rect,
+      moved: false,
+      startX: ev.clientX,
+      startY: ev.clientY
+    };
+    el.classList.add('dragging');
+    el.setPointerCapture?.(ev.pointerId);
+  };
+
+  const onPointerMove = (ev) => {
+    if (!drag) return;
+    const dx = ev.clientX - drag.startX;
+    const dy = ev.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    const x = ((ev.clientX - drag.rect.left) / drag.rect.width) * 100;
+    const y = ((ev.clientY - drag.rect.top) / drag.rect.height) * 100;
+    const cx = Math.min(92, Math.max(8, x));
+    const cy = Math.min(92, Math.max(8, y));
+    drag.el.style.left = cx + '%';
+    drag.el.style.top = cy + '%';
+    drag.pos = { pos_x: cx, pos_y: cy };
+  };
+
+  const onPointerUp = async (ev) => {
+    if (!drag) return;
+    const { el, id, pos, moved } = drag;
+    el.classList.remove('dragging');
+    el.releasePointerCapture?.(ev.pointerId);
+    drag = null;
+    if (!moved || !pos) return;
+    try {
+      const r = await api(`/api/tables/${id}/position`, { method: 'PATCH', body: pos });
+      const t = state.tables.find((x) => x.id === id);
+      if (t && r.table) {
+        t.pos_x = r.table.pos_x;
+        t.pos_y = r.table.pos_y;
+      }
+    } catch (err) {
+      toast(err.message, true);
+      await loadView();
+    }
+  };
+
+  map.addEventListener('pointerdown', onPointerDown);
+  map.addEventListener('pointermove', onPointerMove);
+  map.addEventListener('pointerup', onPointerUp);
+  map.addEventListener('pointercancel', onPointerUp);
+}
+
+function dataPanel({ id, head = '', rows = [], pageSize = 10, searchPlaceholder = 'Buscar…', empty = 'Sin datos', mode = 'table' }) {
+  const payload = encodeURIComponent(JSON.stringify({
+    pageSize,
+    mode,
+    empty,
+    head,
+    rows
+  }));
+  return `
+    <div class="data-panel card" data-panel="${esc(id)}" data-payload="${payload}">
+      <div class="data-toolbar">
+        <input type="search" class="data-search" placeholder="${esc(searchPlaceholder)}" autocomplete="off" />
+        <span class="data-meta"></span>
+      </div>
+      ${mode === 'cards'
+    ? `<div class="grid catalog data-cards"></div>`
+    : `<div class="table-wrap tight"><table class="data"><thead>${head}</thead><tbody class="data-body"></tbody></table></div>`}
+      <div class="data-pager">
+        <button type="button" class="btn ghost" data-dir="-1">Anterior</button>
+        <span class="data-page"></span>
+        <button type="button" class="btn ghost" data-dir="1">Siguiente</button>
+      </div>
+    </div>`;
+}
+
+function bindDataPanels() {
+  root.querySelectorAll('.data-panel[data-payload]').forEach((panel) => {
+    let cfg;
+    try { cfg = JSON.parse(decodeURIComponent(panel.dataset.payload)); } catch { return; }
+    const statePanel = { q: '', page: 0, ...cfg };
+    const search = panel.querySelector('.data-search');
+    const meta = panel.querySelector('.data-meta');
+    const pageLabel = panel.querySelector('.data-page');
+    const body = panel.querySelector('.data-body');
+    const cards = panel.querySelector('.data-cards');
+    const prev = panel.querySelector('[data-dir="-1"]');
+    const next = panel.querySelector('[data-dir="1"]');
+
+    function fold(s) {
+      return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    }
+
+    function paint() {
+      const q = fold(statePanel.q);
+      const filtered = (statePanel.rows || []).filter((r) => !q || fold(r.search).includes(q));
+      const pages = Math.max(1, Math.ceil(filtered.length / statePanel.pageSize));
+      if (statePanel.page >= pages) statePanel.page = pages - 1;
+      if (statePanel.page < 0) statePanel.page = 0;
+      const start = statePanel.page * statePanel.pageSize;
+      const slice = filtered.slice(start, start + statePanel.pageSize);
+      if (statePanel.mode === 'cards') {
+        cards.innerHTML = slice.map((r) => r.html).join('') || `<div class="empty card">${esc(statePanel.empty)}</div>`;
+      } else {
+        const cols = (statePanel.head.match(/<th/gi) || []).length || 1;
+        body.innerHTML = slice.map((r) => r.html).join('') || `<tr><td colspan="${cols}">${esc(statePanel.empty)}</td></tr>`;
+      }
+      meta.textContent = filtered.length
+        ? `${filtered.length} resultado${filtered.length === 1 ? '' : 's'}`
+        : '0 resultados';
+      pageLabel.textContent = `Pág. ${statePanel.page + 1} / ${pages}`;
+      prev.disabled = statePanel.page <= 0;
+      next.disabled = statePanel.page >= pages - 1;
+    }
+
+    search.oninput = () => { statePanel.q = search.value; statePanel.page = 0; paint(); };
+    prev.onclick = () => { statePanel.page -= 1; paint(); };
+    next.onclick = () => { statePanel.page += 1; paint(); };
+    paint();
+  });
 }
 
 boot();

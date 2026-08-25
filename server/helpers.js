@@ -47,12 +47,31 @@ function presentStatus(status) {
 function presentTable(t) {
   if (!t) return t;
   const joined = t.joined_to_id ?? t.joined_to_id ?? null;
+  const posX = t.pos_x != null ? Number(t.pos_x) : null;
+  const posY = t.pos_y != null ? Number(t.pos_y) : null;
   return {
     ...t,
     status: presentStatus(t.status),
     joined_to_id: joined,
     joined_to_id: joined,
-    joined_to_name: t.joined_to_name ?? t.joined_to_name ?? null
+    joined_to_name: t.joined_to_name ?? t.joined_to_name ?? null,
+    pos_x: Number.isFinite(posX) ? posX : null,
+    pos_y: Number.isFinite(posY) ? posY : null
+  };
+}
+
+/** Siguiente hueco en grilla 4 columnas (porcentajes 0–100). */
+function nextFloorSlot() {
+  const db = getDb();
+  const n = db.prepare('SELECT COUNT(*) AS n FROM restaurant_tables').get().n;
+  const cols = 4;
+  const col = n % cols;
+  const row = Math.floor(n / cols);
+  const pos_x = 14 + col * 24;
+  const pos_y = 18 + (row % 5) * 16;
+  return {
+    pos_x: Math.min(88, Math.max(8, pos_x)),
+    pos_y: Math.min(88, Math.max(8, pos_y))
   };
 }
 
@@ -66,7 +85,8 @@ function presentItem(i) {
     cancelled_by: i.cancelled_by ?? i.cancelled_by,
     cancelled_at: i.cancelled_at ?? i.cancelled_at,
     cancel_reason: i.cancel_reason ?? i.cancel_reason,
-    removed_json: i.removed_json ?? i.removed_json
+    removed_json: i.removed_json ?? i.removed_json,
+    added_json: i.added_json ?? i.added_json ?? '[]'
   };
 }
 
@@ -258,6 +278,7 @@ module.exports = {
   tableList: tableList,
   presentTable,
   presentOrder,
+  nextFloorSlot,
   salonSnapshot,
   freeTableAndJoins,
   cancelOpenOrder
