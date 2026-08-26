@@ -109,7 +109,9 @@ function ticketLines(payload) {
   }
   push('-'.repeat(cols));
   push(pad('Subtotal', money(inv.subtotal), cols));
+  if (Number(inv.discount) > 0) push(pad('Descuento', '-' + money(inv.discount), cols));
   if (Number(inv.tax) > 0) push(pad(`IVA ${inv.tax_rate}%`, money(inv.tax), cols));
+  if (Number(inv.tip) > 0) push(pad('Propina', money(inv.tip), cols));
   push(pad('TOTAL', money(inv.total), cols));
   push('-'.repeat(cols));
   for (const p of payments) {
@@ -191,7 +193,9 @@ function ticketHtml(payload) {
   <hr>
   <table>
     <tr><td>Subtotal</td><td class="r">${money(inv.subtotal)}</td></tr>
+    ${Number(inv.discount) > 0 ? `<tr><td>Descuento</td><td class="r">-${money(inv.discount)}</td></tr>` : ''}
     ${Number(inv.tax) > 0 ? `<tr><td>IVA ${inv.tax_rate}%</td><td class="r">${money(inv.tax)}</td></tr>` : ''}
+    ${Number(inv.tip) > 0 ? `<tr><td>Propina</td><td class="r">${money(inv.tip)}</td></tr>` : ''}
     <tr class="total"><td>TOTAL</td><td class="r">${money(inv.total)}</td></tr>
   </table>
   <hr>

@@ -7,9 +7,10 @@ const {
   nextFloorSlot, presentTable
 } = require('./helpers');
 const inventory = require('./inventory');
-const { saveBackup, listBackups } = require('./backup');
+const { saveBackup, listBackups, scheduleRestore } = require('./backup');
 const { printInvoice, printTest, printKitchenOrder, printCashOpen, printCashExpense, printCashClose } = require('./print');
 const { lanUrls } = require('./lan');
+const { publicLicense, APP_VERSION } = require('./license');
 
 function fail(res, status, message) {
   return res.status(status).json({ error: message });
@@ -38,10 +39,18 @@ function mountApi(app) {
   const db = () => getDb();
 
   app.get('/api/info', (_req, res) => {
+    const s = getAllSettings();
     res.json({
-      business_name: getSetting('business_name', 'JR Burger'),
-      lan_urls: lanUrls(Number(process.env.PORT || 3000))
+      business_name: getSetting('business_name', 'Mi Restaurante'),
+      business_tagline: getSetting('business_tagline', 'Sistema de gestión'),
+      lan_urls: lanUrls(Number(process.env.PORT || 3000)),
+      license: publicLicense(),
+      app_version: APP_VERSION
     });
+  });
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true, version: APP_VERSION });
   });
 
   app.post('/api/login', (req, res) => {
@@ -51,10 +60,22 @@ function mountApi(app) {
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
       return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
     }
+    const lic = publicLicense();
+    if (lic.expired && user.role !== 'admin') {
+      return res.status(402).json({
+        error: 'El servicio venció. Contacte a su proveedor.',
+        code: 'LICENSE_EXPIRED',
+        license: lic
+      });
+    }
     req.session.user = publicUser(user);
     req.session.save((err) => {
       if (err) return res.status(500).json({ error: 'No se pudo entrar. Intente otra vez' });
-      res.json({ user: publicUser(user) });
+      res.json({
+        user: publicUser(user),
+        license: lic,
+        must_change_password: Number(user.must_change_password) === 1
+      });
     });
   });
 
@@ -63,17 +84,44 @@ function mountApi(app) {
   });
 
   app.get('/api/me', requireAuth, (req, res) => {
+    const s = publicSettings();
+    const setup = {
+      completed: getSetting('setup_completed', '0') === '1',
+      needs_business: !s.business_name || s.business_name === 'Mi Restaurante' || s.business_name === 'JR Burger',
+      needs_password: Boolean(req.user.must_change_password)
+    };
     res.json({
       user: req.user,
-      settings: publicSettings(),
-      alerts: inventory.lowStock()
+      settings: s,
+      alerts: inventory.lowStock(),
+      license: req.license,
+      setup
     });
+  });
+
+  app.post('/api/password', requireAuth, (req, res) => {
+    const current = String(req.body.current || '');
+    const next = String(req.body.password || '');
+    if (next.length < 6) return fail(res, 400, 'La nueva contraseña debe tener al menos 6 caracteres');
+    const row = db().prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!row || !bcrypt.compareSync(current, row.password_hash)) {
+      return fail(res, 400, 'La contraseña actual no es correcta');
+    }
+    if (bcrypt.compareSync(next, row.password_hash)) {
+      return fail(res, 400, 'La nueva contraseña debe ser distinta a la actual');
+    }
+    db().prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
+      .run(bcrypt.hashSync(next, 10), req.user.id);
+    const user = publicUser(db().prepare('SELECT * FROM users WHERE id = ?').get(req.user.id));
+    req.session.user = user;
+    res.json({ user, message: 'Contraseña actualizada' });
   });
 
   function publicSettings() {
     const s = getAllSettings();
     return {
       business_name: s.business_name,
+      business_tagline: s.business_tagline || '',
       business_nit: s.business_nit,
       business_address: s.business_address,
       business_phone: s.business_phone,
@@ -83,7 +131,12 @@ function mountApi(app) {
       printer_name: s.printer_name || '',
       printer_enabled: s.printer_enabled === '1',
       block_on_no_stock: s.block_on_no_stock === '1',
-      ticket_footer: s.ticket_footer || ''
+      ticket_footer: s.ticket_footer || '',
+      vendor_name: s.vendor_name || '',
+      vendor_phone: s.vendor_phone || '',
+      vendor_whatsapp: s.vendor_whatsapp || '',
+      vendor_email: s.vendor_email || '',
+      setup_completed: s.setup_completed === '1'
     };
   }
 
@@ -796,13 +849,8 @@ function mountApi(app) {
   app.post('/api/invoices', requireAuth, requireRole('cashier'), (req, res) => {
     const register = currentRegister();
     if (!register) return res.status(400).json({ error: 'Abra la caja antes de cobrar' });
-    const order = orderWithItems(req.body.order_id);
-    if (!order || ['billed', 'cancelled'].includes(order.status)) {
-      return res.status(400).json({ error: 'Este pedido no se puede cobrar' });
-    }
-    const active = order.items.filter((i) => i.status !== 'cancelled');
-    if (!active.length) return res.status(400).json({ error: 'El pedido no tiene productos' });
 
+    const orderId = Number(req.body.order_id);
     const payments = Array.isArray(req.body.payments) ? req.body.payments : [];
     const methods = new Set(['efectivo', 'nequi', 'daviplata']);
     let paySum = 0;
@@ -815,56 +863,110 @@ function mountApi(app) {
 
     const taxRate = Number(getSetting('tax_rate', '0'));
     const included = getSetting('tax_included', '1') === '1';
-    const subtotal = active.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-    let tax = 0;
-    let total = subtotal;
-    if (taxRate > 0 && !included) {
-      tax = Math.round(subtotal * taxRate / 100);
-      total = subtotal + tax;
-    } else if (taxRate > 0 && included) {
-      tax = Math.round(subtotal - subtotal / (1 + taxRate / 100));
-    }
-
-    if (Math.round(paySum) < Math.round(total)) {
-      return fail(res, 400, `El pago (${Math.round(paySum)}) no cubre el total (${Math.round(total)})`);
-    }
+    const block = getSetting('block_on_no_stock', '0') === '1';
 
     const given = Math.round(paySum);
-    const change = Math.max(0, given - Math.round(total));
     const applied = payments.map((p) => ({ method: p.method, amount: Number(p.amount) }));
-    let leftover = change;
-    for (const method of ['efectivo', 'nequi', 'daviplata']) {
-      if (leftover <= 0) break;
-      const p = applied.find((x) => x.method === method);
-      if (!p) continue;
-      const cut = Math.min(p.amount, leftover);
-      p.amount -= cut;
-      leftover -= cut;
-    }
 
     try {
-      const invoiceId = withTx(() => {
+      const result = withTx(() => {
+        const order = orderWithItems(orderId);
+        if (!order || ['billed', 'cancelled'].includes(order.status)) {
+          const err = new Error('Este pedido no se puede cobrar');
+          err.http = 400;
+          throw err;
+        }
+        const active = order.items.filter((i) => i.status !== 'cancelled');
+        if (!active.length) {
+          const err = new Error('El pedido no tiene productos');
+          err.http = 400;
+          throw err;
+        }
+
+        const subtotal = active.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+        let discount = Math.max(0, Math.round(Number(req.body.discount) || 0));
+        let tip = Math.max(0, Math.round(Number(req.body.tip) || 0));
+        if (discount > Math.round(subtotal)) {
+          const err = new Error('El descuento no puede ser mayor que la suma');
+          err.http = 400;
+          throw err;
+        }
+        const base = Math.max(0, subtotal - discount);
+        let tax = 0;
+        let total = base;
+        if (taxRate > 0 && !included) {
+          tax = Math.round(base * taxRate / 100);
+          total = base + tax;
+        } else if (taxRate > 0 && included) {
+          tax = Math.round(base - base / (1 + taxRate / 100));
+        }
+        total = Math.round(total + tip);
+
+        if (given < Math.round(total)) {
+          const err = new Error(`El pago (${given}) no cubre el total (${Math.round(total)})`);
+          err.http = 400;
+          throw err;
+        }
+
+        if (block) {
+          const stock = inventory.checkItemsStock(active);
+          if (!stock.ok) {
+            const err = new Error('No alcanza el ingrediente');
+            err.http = 409;
+            err.shortages = stock.shortages;
+            throw err;
+          }
+        }
+
+        const reg = db().prepare("SELECT id FROM cash_registers WHERE id = ? AND status = 'open'").get(register.id);
+        if (!reg) {
+          const err = new Error('La caja se cerró. Abra la caja antes de cobrar');
+          err.http = 400;
+          throw err;
+        }
+
+        const change = Math.max(0, given - Math.round(total));
+        const payApplied = applied.map((p) => ({ ...p }));
+        let leftover = change;
+        for (const method of ['efectivo', 'nequi', 'daviplata']) {
+          if (leftover <= 0) break;
+          const p = payApplied.find((x) => x.method === method);
+          if (!p) continue;
+          const cut = Math.min(p.amount, leftover);
+          p.amount -= cut;
+          leftover -= cut;
+        }
+
         const nextNum = (db().prepare('SELECT COALESCE(MAX(number),0) AS n FROM invoices').get().n) + 1;
         const info = db().prepare(`
-          INSERT INTO invoices (number, order_id, table_id, cashier_id, register_id, subtotal, tax_rate, tax, total)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(nextNum, order.id, order.table_id, req.user.id, register.id, subtotal, taxRate, tax, total);
+          INSERT INTO invoices (number, order_id, table_id, cashier_id, register_id, subtotal, discount, tip, tax_rate, tax, total)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(nextNum, order.id, order.table_id, req.user.id, register.id, subtotal, discount, tip, taxRate, tax, total);
 
         const insPay = db().prepare('INSERT INTO payments (invoice_id, method, amount) VALUES (?, ?, ?)');
         const insMove = db().prepare(`
           INSERT INTO cash_movements (register_id, type, method, amount, description, user_id, invoice_id)
           VALUES (?, 'sale', ?, ?, ?, ?, ?)
         `);
-        for (const p of applied) {
+        for (const p of payApplied) {
           if (!(Number(p.amount) > 0)) continue;
           insPay.run(info.lastInsertRowid, p.method, p.amount);
           insMove.run(register.id, p.method, p.amount, `Venta ticket #${nextNum}`, req.user.id, info.lastInsertRowid);
         }
 
-        db().prepare("UPDATE orders SET status = 'billed', updated_at = datetime('now','localtime') WHERE id = ?").run(order.id);
-        inventory.consumeOrder(order.id, req.user.id);
+        const billed = db().prepare(`
+          UPDATE orders SET status = 'billed', updated_at = datetime('now','localtime')
+          WHERE id = ? AND status NOT IN ('billed','cancelled')
+        `).run(order.id);
+        if (!billed.changes) {
+          const err = new Error('Este pedido ya se cobró');
+          err.http = 400;
+          throw err;
+        }
+
+        inventory.consumeOrder(order.id, req.user.id, { allowNegative: !block });
         freeTableAndJoins(order.table_id);
-        return info.lastInsertRowid;
+        return { invoiceId: info.lastInsertRowid, change };
       });
 
       emit(req, 'tables:changed', {});
@@ -873,23 +975,24 @@ function mountApi(app) {
       emit(req, 'cash:changed', {});
       emit(req, 'inventory:changed', {});
 
-      printInvoice(invoiceId, { change }).then((print) => {
+      printInvoice(result.invoiceId, { change: result.change }).then((print) => {
         res.json({
-          invoice: invoiceFull(invoiceId),
+          invoice: invoiceFull(result.invoiceId),
           print,
-          change,
+          change: result.change,
           alerts: inventory.lowStock()
         });
       }).catch((e) => {
         res.json({
-          invoice: invoiceFull(invoiceId),
+          invoice: invoiceFull(result.invoiceId),
           print: { ok: false, error: e.message, mode: 'browser' },
-          change,
+          change: result.change,
           alerts: inventory.lowStock()
         });
       });
     } catch (e) {
       console.error(e);
+      if (e.shortages) return res.status(e.http || 409).json({ error: e.message, shortages: e.shortages });
       return fail(res, e.http || 500, e.message || 'No se pudo cobrar. Intente de nuevo.');
     }
   });
@@ -917,6 +1020,62 @@ function mountApi(app) {
       res.json({ print });
     } catch (e) {
       res.status(500).json({ error: e.message, print: { ok: false, mode: 'browser' } });
+    }
+  });
+
+  app.post('/api/invoices/:id/cancel', requireAuth, requireRole('cashier'), (req, res) => {
+    const reason = String(req.body.reason || 'Anulación').trim() || 'Anulación';
+    const register = currentRegister();
+    if (!register) return fail(res, 400, 'Abra la caja antes de anular un ticket');
+    try {
+      const inv = withTx(() => {
+        const row = db().prepare('SELECT * FROM invoices WHERE id = ?').get(req.params.id);
+        if (!row) {
+          const err = new Error('Cuenta no encontrada');
+          err.http = 404;
+          throw err;
+        }
+        if (row.status !== 'paid') {
+          const err = new Error('Este ticket ya está anulado');
+          err.http = 400;
+          throw err;
+        }
+        const cancelled = db().prepare(`
+          UPDATE invoices SET status = 'cancelled' WHERE id = ? AND status = 'paid'
+        `).run(row.id);
+        if (!cancelled.changes) {
+          const err = new Error('No se pudo anular el ticket');
+          err.http = 400;
+          throw err;
+        }
+        inventory.restoreOrder(row.order_id, req.user.id);
+        const payments = db().prepare('SELECT * FROM payments WHERE invoice_id = ?').all(row.id);
+        const insMove = db().prepare(`
+          INSERT INTO cash_movements (register_id, type, method, amount, description, user_id, invoice_id)
+          VALUES (?, 'sale', ?, ?, ?, ?, ?)
+        `);
+        for (const p of payments) {
+          if (!(Number(p.amount) > 0)) continue;
+          insMove.run(
+            register.id,
+            p.method,
+            -Number(p.amount),
+            `Anulación ticket #${row.number}: ${reason}`,
+            req.user.id,
+            row.id
+          );
+        }
+        return row;
+      });
+      emit(req, 'cash:changed', {});
+      emit(req, 'inventory:changed', {});
+      res.json({
+        ok: true,
+        invoice: invoiceFull(inv.id),
+        message: `Ticket #${inv.number} anulado. El stock se restauró.`
+      });
+    } catch (e) {
+      return fail(res, e.http || 500, e.message || 'No se pudo anular el ticket');
     }
   });
 
@@ -951,19 +1110,30 @@ function mountApi(app) {
   });
 
   app.post('/api/cash/open', requireAuth, requireRole('cashier'), async (req, res) => {
-    if (currentRegister()) return fail(res, 400, 'Ya hay una caja abierta');
     const amount = Number(req.body.opening_amount);
     if (!(amount >= 0)) return fail(res, 400, 'Ese valor de apertura no sirve');
-    const info = db().prepare(
-      'INSERT INTO cash_registers (opened_by, opening_amount) VALUES (?, ?)'
-    ).run(req.user.id, amount);
-    emit(req, 'cash:changed', {});
-    const register = db().prepare('SELECT * FROM cash_registers WHERE id = ?').get(info.lastInsertRowid);
-    const print = await printCashOpen(register.id).catch((e) => ({
-      ok: false, html: null, error: e.message,
-      message: 'La caja ya quedó abierta. Puede imprimir el ticket desde el computador.'
-    }));
-    res.json({ register, print });
+    try {
+      const register = withTx(() => {
+        const open = db().prepare("SELECT id FROM cash_registers WHERE status = 'open' LIMIT 1").get();
+        if (open) {
+          const err = new Error('Ya hay una caja abierta');
+          err.http = 400;
+          throw err;
+        }
+        const info = db().prepare(
+          'INSERT INTO cash_registers (opened_by, opening_amount) VALUES (?, ?)'
+        ).run(req.user.id, amount);
+        return db().prepare('SELECT * FROM cash_registers WHERE id = ?').get(info.lastInsertRowid);
+      });
+      emit(req, 'cash:changed', {});
+      const print = await printCashOpen(register.id).catch((e) => ({
+        ok: false, html: null, error: e.message,
+        message: 'La caja ya quedó abierta. Puede imprimir el ticket desde el computador.'
+      }));
+      res.json({ register, print });
+    } catch (e) {
+      return fail(res, e.http || 500, e.message || 'No se pudo abrir la caja');
+    }
   });
 
   app.post('/api/cash/expense', requireAuth, requireRole('cashier'), async (req, res) => {
@@ -1095,17 +1265,17 @@ function mountApi(app) {
     const username = String(req.body.username || '').trim();
     const password = String(req.body.password || '');
     const role = req.body.role;
-    if (!name || !username || password.length < 4) {
-      return res.status(400).json({ error: 'Faltan nombre, usuario y contraseña (mínimo 4 letras)' });
+    if (!name || !username || password.length < 6) {
+      return res.status(400).json({ error: 'Faltan nombre, usuario y contraseña (mínimo 6 letras)' });
     }
     if (!['admin', 'waiter', 'kitchen', 'cashier'].includes(role)) {
       return res.status(400).json({ error: 'Ese cargo no sirve' });
     }
     try {
       const info = db().prepare(
-        'INSERT INTO users (name, username, password_hash, role) VALUES (?, ?, ?, ?)'
+        'INSERT INTO users (name, username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?, 1)'
       ).run(name, username, bcrypt.hashSync(password, 10), role);
-      res.json({ user: db().prepare('SELECT id, name, username, role, active FROM users WHERE id = ?').get(info.lastInsertRowid) });
+      res.json({ user: publicUser(db().prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid)) });
     } catch (e) {
       res.status(400).json({ error: 'Ese usuario ya existe' });
     }
@@ -1123,10 +1293,119 @@ function mountApi(app) {
     }
     db().prepare('UPDATE users SET name = ?, role = ?, active = ? WHERE id = ?').run(name, role, active, u.id);
     if (req.body.password) {
-      if (String(req.body.password).length < 4) return res.status(400).json({ error: 'La contraseña es muy corta' });
-      db().prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(req.body.password, 10), u.id);
+      if (String(req.body.password).length < 6) return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+      db().prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?')
+        .run(bcrypt.hashSync(req.body.password, 10), u.id);
     }
-    res.json({ user: db().prepare('SELECT id, name, username, role, active FROM users WHERE id = ?').get(u.id) });
+    res.json({ user: publicUser(db().prepare('SELECT * FROM users WHERE id = ?').get(u.id)) });
+  });
+
+  // —— Panel de control ——
+  app.get('/api/dashboard', requireAuth, requireRole(), (req, res) => {
+    const dayRow = db().prepare("SELECT date('now','localtime') AS d, date('now','localtime','-1 day') AS y, date('now','localtime','-6 day') AS w0").get();
+    const today = dayRow.d;
+    const yesterday = dayRow.y;
+    const weekFrom = dayRow.w0;
+    const dayStart = (d) => `${d} 00:00:00`;
+    const dayEnd = (d) => `${d} 23:59:59`;
+
+    const invTotals = (from, to) => db().prepare(`
+      SELECT COUNT(*) AS tickets, COALESCE(SUM(total),0) AS total, COALESCE(SUM(tax),0) AS tax,
+             COALESCE(SUM(discount),0) AS discount, COALESCE(SUM(tip),0) AS tip
+      FROM invoices WHERE status = 'paid' AND created_at >= ? AND created_at <= ?
+    `).get(from, to);
+
+    const todayT = invTotals(dayStart(today), dayEnd(today));
+    const yesterdayT = invTotals(dayStart(yesterday), dayEnd(yesterday));
+    const weekT = invTotals(dayStart(weekFrom), dayEnd(today));
+
+    const daily = db().prepare(`
+      SELECT substr(created_at,1,10) AS day, COUNT(*) AS tickets, SUM(total) AS total
+      FROM invoices WHERE status = 'paid' AND created_at >= ? AND created_at <= ?
+      GROUP BY day ORDER BY day
+    `).all(dayStart(weekFrom), dayEnd(today));
+
+    const methods = db().prepare(`
+      SELECT p.method, SUM(p.amount) AS total
+      FROM payments p JOIN invoices i ON i.id = p.invoice_id
+      WHERE i.status = 'paid' AND i.created_at >= ? AND i.created_at <= ?
+      GROUP BY p.method
+      ORDER BY total DESC
+    `).all(dayStart(today), dayEnd(today));
+
+    const topProducts = db().prepare(`
+      SELECT oi.product_name, SUM(oi.quantity) AS qty, SUM(oi.quantity * oi.unit_price) AS total
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN invoices i ON i.order_id = o.id
+      WHERE i.status = 'paid' AND oi.status != 'cancelled'
+        AND i.created_at >= ? AND i.created_at <= ?
+      GROUP BY oi.product_name
+      ORDER BY qty DESC
+      LIMIT 6
+    `).all(dayStart(weekFrom), dayEnd(today));
+
+    const tables = db().prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'free' AND joined_to_id IS NULL THEN 1 ELSE 0 END) AS free,
+        SUM(CASE WHEN status = 'occupied' OR joined_to_id IS NOT NULL THEN 1 ELSE 0 END) AS occupied,
+        SUM(CASE WHEN status = 'waiting_payment' THEN 1 ELSE 0 END) AS waiting_payment,
+        SUM(CASE WHEN status = 'reserved' THEN 1 ELSE 0 END) AS reserved,
+        COUNT(*) AS total
+      FROM restaurant_tables
+    `).get();
+
+    const kitchenPending = db().prepare(`
+      SELECT COUNT(*) AS n FROM order_items
+      WHERE sent = 1 AND status IN ('pending','preparing')
+    `).get().n;
+
+    const openSales = db().prepare(`
+      SELECT COALESCE(SUM(oi.quantity * oi.unit_price), 0) AS total
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE o.status NOT IN ('billed','cancelled') AND oi.status != 'cancelled'
+    `).get().total;
+
+    const recent = db().prepare(`
+      SELECT i.id, i.number, i.total, i.created_at, t.name AS table_name
+      FROM invoices i
+      LEFT JOIN orders o ON o.id = i.order_id
+      LEFT JOIN restaurant_tables t ON t.id = o.table_id
+      WHERE i.status = 'paid'
+      ORDER BY i.id DESC
+      LIMIT 8
+    `).all();
+
+    const register = currentRegister();
+    const salon = salonSnapshot();
+    const stockAlerts = inventory.lowStock().slice(0, 6);
+
+    const avgTicket = todayT.tickets > 0 ? todayT.total / todayT.tickets : 0;
+    const vsYesterday = yesterdayT.total > 0
+      ? Math.round(((todayT.total - yesterdayT.total) / yesterdayT.total) * 100)
+      : (todayT.total > 0 ? 100 : 0);
+
+    res.json({
+      generated_at: db().prepare("SELECT datetime('now','localtime') AS t").get().t,
+      today: { date: today, ...todayT, avg_ticket: avgTicket, vs_yesterday_pct: vsYesterday },
+      yesterday: { date: yesterday, ...yesterdayT },
+      week: { from: weekFrom, to: today, ...weekT },
+      daily,
+      methods,
+      top_products: topProducts,
+      tables,
+      salon,
+      kitchen_pending: kitchenPending,
+      open_sales: openSales,
+      recent_invoices: recent,
+      cash: register
+        ? { open: true, id: register.id, opened_at: register.opened_at, summary: cashSummary(register.id) }
+        : { open: false },
+      stock_alerts: stockAlerts.map((a) => ({
+        id: a.id, name: a.name, unit: a.unit, stock: a.stock, min_stock: a.min_stock
+      }))
+    });
   });
 
   // —— Reportes ——
@@ -1191,6 +1470,31 @@ function mountApi(app) {
     res.json({ from, to, waiters: rows });
   });
 
+  app.get('/api/reports/audit', requireAuth, requireRole(), (req, res) => {
+    const { from, to } = range(req.query);
+    const rows = db().prepare(`
+      SELECT
+        c.id,
+        c.created_at,
+        c.action,
+        c.details,
+        u.name AS user_name,
+        oi.product_name,
+        oi.quantity,
+        o.id AS order_id,
+        t.name AS table_name
+      FROM item_changes c
+      JOIN users u ON u.id = c.user_id
+      JOIN order_items oi ON oi.id = c.order_item_id
+      JOIN orders o ON o.id = oi.order_id
+      JOIN restaurant_tables t ON t.id = o.table_id
+      WHERE c.created_at >= ? AND c.created_at <= ?
+      ORDER BY c.id DESC
+      LIMIT 500
+    `).all(from, to);
+    res.json({ from, to, audit: rows });
+  });
+
   function range(q) {
     const to = q.to ? q.to + ' 23:59:59' : db().prepare("SELECT datetime('now','localtime') AS t").get().t;
     const from = q.from ? q.from + ' 00:00:00' : db().prepare("SELECT datetime('now','localtime','-30 day') AS t").get().t;
@@ -1204,7 +1508,7 @@ function mountApi(app) {
 
   app.put('/api/settings', requireAuth, requireRole(), (req, res) => {
     const allowed = [
-      'business_name', 'business_nit', 'business_address', 'business_phone',
+      'business_name', 'business_tagline', 'business_nit', 'business_address', 'business_phone',
       'tax_rate', 'tax_included', 'printer_width', 'printer_name', 'printer_enabled',
       'block_on_no_stock', 'ticket_footer'
     ];
@@ -1214,7 +1518,11 @@ function mountApi(app) {
       if (typeof val === 'boolean') val = val ? '1' : '0';
       setSetting(key, val);
     }
-    res.json({ settings: publicSettings() });
+    const name = getSetting('business_name', '');
+    if (name && name !== 'Mi Restaurante' && name !== 'JR Burger') {
+      setSetting('setup_completed', '1');
+    }
+    res.json({ settings: publicSettings(), license: publicLicense() });
   });
 
   app.post('/api/backup', requireAuth, requireRole(), (req, res) => {
@@ -1226,103 +1534,24 @@ function mountApi(app) {
     res.json({ backups: listBackups() });
   });
 
-  /**
-   * Deja el local listo para abrir: conserva menú (categorías, productos,
-   * ingredientes, recetas) y mesas. Borra ventas, caja, movimientos de stock,
-   * usuarios que no sean admin, y pone el inventario en 0.
-   */
-  app.post('/api/install/reset', requireAuth, requireRole(), (req, res) => {
+  app.post('/api/backups/restore', requireAuth, requireRole(), (req, res) => {
     const confirm = String(req.body.confirm || '').trim().toUpperCase();
-    if (confirm !== 'INSTALAR') {
-      return fail(res, 400, 'Escriba INSTALAR para confirmar el reinicio');
+    if (confirm !== 'RESTAURAR') {
+      return fail(res, 400, 'Escriba RESTAURAR para confirmar');
     }
-    const resetStock = req.body.reset_stock !== false && req.body.reset_stock !== 0 && req.body.reset_stock !== '0';
-    let backup = null;
     try {
-      backup = saveBackup('pre-install-reset');
+      const r = scheduleRestore(req.body.filename);
+      res.json({
+        ok: true,
+        filename: r.filename,
+        safety: r.safety,
+        restart: true,
+        message: `Copia programada: ${r.filename}. Cierre esta ventana y vuelva a abrir iniciar.bat. Se guardó una copia de seguridad: ${r.safety}`
+      });
     } catch (e) {
-      console.error('backup before install reset', e);
+      return fail(res, e.http || 500, e.message || 'No se pudo programar la restauración');
     }
-
-    const summary = withTx(() => {
-      const counts = {
-        payments: db().prepare('SELECT COUNT(*) AS n FROM payments').get().n,
-        invoices: db().prepare('SELECT COUNT(*) AS n FROM invoices').get().n,
-        cash_moves: db().prepare('SELECT COUNT(*) AS n FROM cash_movements').get().n,
-        cash_registers: db().prepare('SELECT COUNT(*) AS n FROM cash_registers').get().n,
-        item_changes: db().prepare('SELECT COUNT(*) AS n FROM item_changes').get().n,
-        order_items: db().prepare('SELECT COUNT(*) AS n FROM order_items').get().n,
-        orders: db().prepare('SELECT COUNT(*) AS n FROM orders').get().n,
-        inv_moves: db().prepare('SELECT COUNT(*) AS n FROM inventory_movements').get().n,
-        users_removed: 0
-      };
-
-      db().prepare('DELETE FROM payments').run();
-      db().prepare('DELETE FROM cash_movements').run();
-      db().prepare('DELETE FROM invoices').run();
-      db().prepare('DELETE FROM item_changes').run();
-      db().prepare('DELETE FROM order_items').run();
-      db().prepare('DELETE FROM orders').run();
-      db().prepare('DELETE FROM cash_registers').run();
-      db().prepare('DELETE FROM inventory_movements').run();
-
-      const removed = db().prepare("DELETE FROM users WHERE role != 'admin'").run();
-      counts.users_removed = removed.changes || 0;
-
-      let admins = db().prepare("SELECT id FROM users WHERE role = 'admin' AND active = 1").all();
-      if (!admins.length) {
-        const hash = bcrypt.hashSync('admin123', 10);
-        const info = db().prepare(
-          'INSERT INTO users (name, username, password_hash, role) VALUES (?, ?, ?, ?)'
-        ).run('Administrador', 'admin', hash, 'admin');
-        admins = [{ id: info.lastInsertRowid }];
-      }
-
-      db().prepare(`
-        UPDATE restaurant_tables
-        SET status = 'free', joined_to_id = NULL
-      `).run();
-
-      if (resetStock) {
-        db().prepare('UPDATE ingredients SET stock = 0').run();
-      }
-
-      return {
-        counts,
-        admin_id: admins[0].id,
-        products: db().prepare('SELECT COUNT(*) AS n FROM products').get().n,
-        ingredients: db().prepare('SELECT COUNT(*) AS n FROM ingredients').get().n,
-        categories: db().prepare('SELECT COUNT(*) AS n FROM categories').get().n,
-        tables: db().prepare('SELECT COUNT(*) AS n FROM restaurant_tables').get().n,
-        reset_stock: resetStock
-      };
-    });
-
-    if (req.user.role !== 'admin') {
-      req.session.destroy(() => {});
-    } else {
-      const still = db().prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.user.id);
-      if (!still || still.role !== 'admin') {
-        req.session.destroy(() => {});
-      } else {
-        req.session.user = publicUser(still);
-      }
-    }
-
-    emit(req, 'tables:changed', {});
-    emit(req, 'orders:changed', {});
-    emit(req, 'kitchen:changed', {});
-    emit(req, 'menu:changed', {});
-
-    res.json({
-      ok: true,
-      backup: backup?.filename || null,
-      ...summary,
-      message: 'Listo para instalar. Quedó el menú y solo usuarios admin. Cree meseros, cocina y cajero desde Personal.'
-    });
   });
-
-  app.get('/api/health', (_req, res) => res.json({ ok: true }));
 }
 
 module.exports = { mountApi };

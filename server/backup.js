@@ -3,6 +3,8 @@ const path = require('path');
 const { getDb, getSetting, setSetting, DB_PATH } = require('./db');
 
 const BACKUP_DIR = path.join(__dirname, '..', 'backups');
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const RESTORE_PENDING = path.join(DATA_DIR, 'restore-pending.txt');
 
 function ensureDir() {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -29,14 +31,61 @@ function saveBackup(reason = 'manual') {
   return { filename, path: dest };
 }
 
+function localToday() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function autoBackup() {
   const last = getSetting('last_auto_backup', '');
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   if (last === today) return null;
   const result = saveBackup('auto');
   setSetting('last_auto_backup', today);
   pruneOld(14);
   return result;
+}
+
+/** Programa restauración para el próximo arranque (seguro con SQLite abierto). */
+function scheduleRestore(filename) {
+  ensureDir();
+  const safe = path.basename(String(filename || ''));
+  if (!safe || !safe.endsWith('.db') || safe.includes('..')) {
+    const err = new Error('Nombre de copia no válido');
+    err.http = 400;
+    throw err;
+  }
+  const src = path.join(BACKUP_DIR, safe);
+  if (!fs.existsSync(src)) {
+    const err = new Error('No se encontró esa copia');
+    err.http = 404;
+    throw err;
+  }
+  const safety = saveBackup('pre-restore');
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(RESTORE_PENDING, safe, 'utf8');
+  return { filename: safe, safety: safety.filename };
+}
+
+/** Aplica restauración pendiente antes de abrir la BD. */
+function applyPendingRestore() {
+  if (!fs.existsSync(RESTORE_PENDING)) return null;
+  const safe = path.basename(fs.readFileSync(RESTORE_PENDING, 'utf8').trim());
+  const src = path.join(BACKUP_DIR, safe);
+  if (!safe.endsWith('.db') || !fs.existsSync(src)) {
+    try { fs.unlinkSync(RESTORE_PENDING); } catch { /* ignore */ }
+    return null;
+  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  for (const ext of ['', '-wal', '-shm']) {
+    const p = DB_PATH + ext;
+    try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* ignore */ }
+  }
+  fs.copyFileSync(src, DB_PATH);
+  try { fs.unlinkSync(RESTORE_PENDING); } catch { /* ignore */ }
+  console.log('Respaldo restaurado:', safe);
+  return safe;
 }
 
 function pruneOld(keep = 14) {
@@ -70,10 +119,10 @@ function manualBackup() {
 
 module.exports = {
   saveBackup,
-  saveBackup: saveBackup,
   autoBackup,
   listBackups,
-  listBackups: listBackups,
   manualBackup,
+  scheduleRestore,
+  applyPendingRestore,
   BACKUP_DIR
 };

@@ -18,6 +18,8 @@ const { autoBackup } = require('./backup');
 const { publicUser } = require('./db');
 
 db.init();
+const { syncLicenseFromDisk } = require('./license');
+syncLicenseFromDisk();
 autoBackup();
 
 const app = express();

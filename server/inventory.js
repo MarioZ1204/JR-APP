@@ -160,7 +160,7 @@ function moveStock({ ingredientId, type, quantity, reason, userId, referenceType
   return { ...ing, stock: next };
 }
 
-function consumeOrder(orderId, userId) {
+function consumeOrder(orderId, userId, { allowNegative = false } = {}) {
   const db = getDb();
   const items = db.prepare(`
     SELECT product_id, quantity, product_name, removed_json, added_json
@@ -188,7 +188,7 @@ function consumeOrder(orderId, userId) {
         userId,
         referenceType: 'order',
         referenceId: orderId,
-        allowNegative: true
+        allowNegative
       });
     }
   }

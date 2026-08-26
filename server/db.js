@@ -38,6 +38,12 @@ function wrap(raw) {
 
 function init() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    const { applyPendingRestore } = require('./backup');
+    applyPendingRestore();
+  } catch (e) {
+    console.error('No se pudo aplicar restauración pendiente:', e.message);
+  }
   db = wrap(new DatabaseSync(DB_PATH));
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
@@ -46,8 +52,8 @@ function init() {
   seedIfEmpty();
   seedCatalog(getDb());
   markCoreRecipeLines();
-  if (getSetting('business_name') === 'JR Restaurante') {
-    setSetting('business_name', 'JR Burger');
+  if (getSetting('business_name') === 'JR Restaurante' || getSetting('business_name') === 'JR Burger') {
+    /* deja el nombre actual; el cliente lo cambia en Ajustes */
   }
   return db;
 }
@@ -61,6 +67,7 @@ function createSchema() {
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL CHECK(role IN ('admin','waiter','kitchen','cashier')),
       active INTEGER NOT NULL DEFAULT 1,
+      must_change_password INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
 
@@ -160,6 +167,8 @@ function createSchema() {
       cashier_id INTEGER NOT NULL REFERENCES users(id),
       register_id INTEGER REFERENCES cash_registers(id),
       subtotal REAL NOT NULL,
+      discount REAL NOT NULL DEFAULT 0,
+      tip REAL NOT NULL DEFAULT 0,
       tax_rate REAL NOT NULL DEFAULT 0,
       tax REAL NOT NULL DEFAULT 0,
       total REAL NOT NULL,
@@ -262,6 +271,17 @@ function migrateSchema() {
   if (!tableColsList.includes('pos_y')) {
     getDb().exec('ALTER TABLE restaurant_tables ADD COLUMN pos_y REAL');
   }
+  const invCols = tableCols('invoices');
+  if (!invCols.includes('discount')) {
+    getDb().exec('ALTER TABLE invoices ADD COLUMN discount REAL NOT NULL DEFAULT 0');
+  }
+  if (!invCols.includes('tip')) {
+    getDb().exec('ALTER TABLE invoices ADD COLUMN tip REAL NOT NULL DEFAULT 0');
+  }
+  const userCols = tableCols('users');
+  if (!userCols.includes('must_change_password')) {
+    getDb().exec('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0');
+  }
   const missingPos = getDb().prepare('SELECT id FROM restaurant_tables WHERE pos_x IS NULL OR pos_y IS NULL ORDER BY sort_order, id').all();
   if (missingPos.length) {
     const cols = 4;
@@ -290,9 +310,10 @@ function markCoreRecipeLines() {
 }
 
 const DEFAULT_SETTINGS = {
-  business_name: 'JR Burger',
+  business_name: 'Mi Restaurante',
+  business_tagline: 'Sistema de gestión',
   business_nit: '',
-  business_address: 'Local 1',
+  business_address: '',
   business_phone: '',
   tax_rate: '0',
   tax_included: '1',
@@ -302,7 +323,15 @@ const DEFAULT_SETTINGS = {
   block_on_no_stock: '0',
   ticket_footer: '¡Gracias por su visita!',
   session_secret: 'jr-local-' + Math.random().toString(36).slice(2),
-  last_auto_backup: ''
+  last_auto_backup: '',
+  license_client: '',
+  license_until: '',
+  license_key: '',
+  vendor_name: '',
+  vendor_phone: '',
+  vendor_whatsapp: '',
+  vendor_email: '',
+  setup_completed: '0'
 };
 
 function seedIfEmpty() {
@@ -316,10 +345,10 @@ function seedIfEmpty() {
 
   const hash = (pwd) => bcrypt.hashSync(pwd, 10);
   const insertUser = db.prepare(
-    'INSERT INTO users (name, username, password_hash, role) VALUES (?, ?, ?, ?)'
+    'INSERT INTO users (name, username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?, 1)'
   );
 
-  const adminId = insertUser.run('Administrador', 'admin', hash('admin123'), 'admin').lastInsertRowid;
+  insertUser.run('Administrador', 'admin', hash('admin123'), 'admin');
   insertUser.run('Mesero', 'mesero', hash('mesero123'), 'waiter');
   insertUser.run('Cocina', 'cocina', hash('cocina123'), 'kitchen');
   insertUser.run('Cajero', 'cajero', hash('cajero123'), 'cashier');
@@ -417,7 +446,8 @@ function publicUser(user) {
     name: user.name,
     username: user.username,
     role: user.role,
-    active: user.active
+    active: user.active,
+    must_change_password: Number(user.must_change_password) === 1
   };
 }
 

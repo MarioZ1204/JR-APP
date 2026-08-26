@@ -27,7 +27,6 @@ export const money = (n) => '$ ' + Math.round(Number(n) || 0).toLocaleString('es
 export const ROLE = {
   admin: 'Jefe',
   waiter: 'Mesero',
-  waiter: 'Mesero',
   kitchen: 'Cocina',
   cashier: 'Cajero'
 };
@@ -82,6 +81,7 @@ export function daysAgo(n) {
 
 export function navFor(role) {
   const all = [
+    { id: 'panel', label: 'Panel', ico: 'panel', roles: ['admin'] },
     { id: 'mesas', label: 'Mesas', ico: 'mesas', roles: ['admin', 'waiter', 'cashier'] },
     { id: 'cocina', label: 'Cocina', ico: 'cocina', roles: ['admin', 'kitchen'] },
     { id: 'facturar', label: 'Cobrar', ico: 'cobrar', roles: ['admin', 'cashier'] },
@@ -95,7 +95,12 @@ export function navFor(role) {
   return all.filter((i) => i.roles.includes(role));
 }
 
+export function allowedViews(role) {
+  return [...navFor(role).map((i) => i.id), 'comanda'];
+}
+
 export function homeFor(role) {
+  if (role === 'admin') return 'panel';
   if (role === 'kitchen') return 'cocina';
   if (role === 'cashier') return 'facturar';
   return 'mesas';

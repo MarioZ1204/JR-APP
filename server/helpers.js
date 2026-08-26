@@ -1,4 +1,5 @@
 const { getDb, publicUser } = require('./db');
+const { publicLicense } = require('./license');
 
 function requireAuth(req, res, next) {
   if (!req.session || !req.session.user) {
@@ -10,6 +11,34 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Su sesión se cerró. Entre de nuevo' });
   }
   req.user = publicUser(user);
+  req.license = publicLicense();
+
+  const path = String(req.path || '');
+  const method = String(req.method || 'GET').toUpperCase();
+  const allowWhileMustChange =
+    (method === 'GET' && (path === '/api/me' || path === '/api/info')) ||
+    (method === 'POST' && (path === '/api/password' || path === '/api/logout'));
+
+  if (req.user.must_change_password && !allowWhileMustChange) {
+    return res.status(403).json({
+      error: 'Debe cambiar su contraseña antes de continuar',
+      code: 'MUST_CHANGE'
+    });
+  }
+
+  const allowWhileExpired =
+    method === 'GET' ||
+    path === '/api/logout' ||
+    path === '/api/password';
+
+  if (req.license.expired && method !== 'GET' && !allowWhileExpired) {
+    return res.status(402).json({
+      error: 'El servicio de este sistema venció. Contacte a su proveedor.',
+      code: 'LICENSE_EXPIRED',
+      license: req.license
+    });
+  }
+
   next();
 }
 
@@ -143,9 +172,11 @@ function orderWithItems(orderId) {
   if (!order) return null;
   const items = db.prepare(`
     SELECT oi.*,
+      COALESCE(p.station, 'kitchen') AS station,
       cu.name AS created_by_name,
       xu.name AS cancelled_by_name
     FROM order_items oi
+    LEFT JOIN products p ON p.id = oi.product_id
     LEFT JOIN users cu ON cu.id = oi.created_by
     LEFT JOIN users xu ON xu.id = oi.cancelled_by
     WHERE oi.order_id = ?

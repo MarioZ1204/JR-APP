@@ -1,5 +1,5 @@
-import { api, money, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor } from './api.js';
-import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=39';
+import { api, money, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews } from './api.js';
+import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=48';
 
 const root = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
@@ -33,18 +33,95 @@ const state = {
   floorEdit: false,
   socket: null,
   live: false,
-  infoName: 'JR Burger',
+  infoName: 'Mi Restaurante',
+  infoTagline: 'Sistema de gestión',
   lanUrls: [],
   moreNav: false,
-  ticketOpen: false
+  ticketOpen: false,
+  loading: false,
+  busy: null,
+  billingTab: 'pending',
+  posSearch: '',
+  tablesView: localStorage.getItem('jr.tablesView') === 'list' ? 'list' : 'floor',
+  kitchenSound: localStorage.getItem('jr.kitchenSound') !== '0',
+  kitchenFullscreen: false,
+  kitchenDark: localStorage.getItem('jr.kitchenDark') === '1',
+  billDiscount: 0,
+  billTip: 0,
+  license: null,
+  setup: null,
+  dashboard: null
 };
 
 function toast(msg, err = false) {
   toastRoot.hidden = false;
-  toastRoot.className = 'toast-root' + (err ? ' err' : '');
-  toastRoot.textContent = msg;
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => { toastRoot.hidden = true; }, 3200);
+  const el = document.createElement('div');
+  el.className = 'toast-item' + (err ? ' err' : '');
+  el.textContent = msg;
+  toastRoot.appendChild(el);
+  setTimeout(() => {
+    el.classList.add('out');
+    setTimeout(() => {
+      el.remove();
+      if (!toastRoot.children.length) toastRoot.hidden = true;
+    }, 280);
+  }, 3200);
+}
+
+function confirmDialog(message, { title = 'Confirmar', confirmText = 'Sí', cancelText = 'No', danger = false } = {}) {
+  return new Promise((resolve) => {
+    modal(`
+      <h3 style="margin-top:0">${esc(title)}</h3>
+      <p class="hint" style="white-space:pre-wrap;margin:0">${esc(message)}</p>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost block" id="cd-cancel">${esc(cancelText)}</button>
+        <button type="button" class="btn ${danger ? 'danger' : 'primary'} block" id="cd-ok">${esc(confirmText)}</button>
+      </div>`);
+    modalRoot.querySelector('#cd-cancel').onclick = () => { closeModal(); resolve(false); };
+    modalRoot.querySelector('#cd-ok').onclick = () => { closeModal(); resolve(true); };
+  });
+}
+
+function promptDialog(message, { title = '', placeholder = '', confirmText = 'Aceptar', required = false } = {}) {
+  return new Promise((resolve) => {
+    modal(`
+      ${title ? `<h3 style="margin-top:0">${esc(title)}</h3>` : ''}
+      ${message ? `<p class="hint">${esc(message)}</p>` : ''}
+      <form id="prompt-form">
+        <div class="field"><input name="value" placeholder="${esc(placeholder)}" autocomplete="off" ${required ? 'required' : ''} /></div>
+        <div class="modal-actions row">
+          <button type="button" class="btn ghost" id="pd-cancel">Cancelar</button>
+          <button type="submit" class="btn primary">${esc(confirmText)}</button>
+        </div>
+      </form>`);
+    modalRoot.querySelector('#pd-cancel').onclick = () => { closeModal(); resolve(null); };
+    modalRoot.querySelector('#prompt-form').onsubmit = (ev) => {
+      ev.preventDefault();
+      const v = new FormData(ev.target).get('value');
+      closeModal();
+      resolve(String(v ?? ''));
+    };
+  });
+}
+
+async function withBusy(key, fn) {
+  if (state.busy) return;
+  state.busy = key;
+  try { return await fn(); }
+  finally { state.busy = null; }
+}
+
+function pageLoading() {
+  return `<div class="page-loading" aria-live="polite"><div class="spinner"></div><p>Cargando…</p></div>`;
+}
+
+function deniedView() {
+  return `
+    <div class="card denied-card">
+      <h2>Sin acceso</h2>
+      <p>Su rol no puede abrir esta sección.</p>
+      <button type="button" class="btn primary" data-act="nav" data-view="${homeFor(state.user.role)}">Ir al inicio</button>
+    </div>`;
 }
 
 function closeModal() { modalRoot.hidden = true; modalRoot.innerHTML = ''; }
@@ -119,15 +196,32 @@ async function boot() {
   try {
     const info = await api('/api/info');
     state.infoName = info.business_name;
+    state.infoTagline = info.business_tagline || 'Sistema de gestión';
     state.lanUrls = info.lan_urls || [];
+    state.license = info.license || null;
   } catch { /* login aún funciona */ }
   window.addEventListener('hashchange', () => loadView());
+  document.addEventListener('fullscreenchange', () => {
+    if (state.view === 'cocina') render();
+  });
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => { /* PWA opcional */ });
+  }
   try {
     const me = await api('/api/me');
     state.user = me.user;
     state.settings = me.settings;
     state.alerts = me.alerts || [];
+    state.license = me.license || state.license;
+    state.setup = me.setup || null;
+    if (state.user.role === 'kitchen' && state.station === 'all') state.station = 'kitchen';
     connectSocket();
+    if (me.user.must_change_password) {
+      go(homeFor(state.user.role));
+      await loadView();
+      showChangePasswordModal(true);
+      return;
+    }
     const parsed = parseHash();
     if (!parsed.view || parsed.view === 'login') go(homeFor(state.user.role));
     else loadView();
@@ -153,6 +247,7 @@ function connectSocket() {
   state.socket.on('tables:changed', refresh);
   state.socket.on('orders:changed', refresh);
   state.socket.on('kitchen:changed', () => {
+    if (state.kitchenSound) playKitchenChime();
     if (state.view === 'cocina') loadView(true);
     else if (state.user?.role === 'kitchen') toast('Llegó un pedido nuevo');
   });
@@ -175,34 +270,68 @@ async function loadView(silent = false) {
   state.view = view;
   state.params = params;
   if (!state.user && view !== 'login') { go('login'); return; }
+  if (state.user && view !== 'login' && !allowedViews(state.user.role).includes(view)) {
+    toast('No tiene acceso a esa sección', true);
+    go(homeFor(state.user.role));
+    return;
+  }
+  if (!silent) {
+    state.loading = true;
+    if (state.user && view !== 'login') render();
+  }
   try {
-    if (view === 'login') { render(); return; }
-    if (view === 'mesas') {
+    if (view === 'login') { state.loading = false; render(); return; }
+    if (view === 'panel') {
+      state.dashboard = await api('/api/dashboard');
+      const me = await api('/api/me');
+      state.alerts = me.alerts || [];
+      state.settings = me.settings;
+      state.license = me.license || state.license;
+      state.setup = me.setup || null;
+    } else if (view === 'mesas') {
       const [tables, me] = await Promise.all([api('/api/tables'), api('/api/me')]);
       state.tables = tables.tables;
       state.alerts = me.alerts || [];
       state.settings = me.settings;
+      state.license = me.license || state.license;
+      state.setup = me.setup || null;
     } else if (view === 'comanda') {
       const prevId = state.order?.id;
-      const [orderWrap, productsWrap, cats, ings] = await Promise.all([
+      const [orderWrap, productsWrap, cats, ings, tablesWrap] = await Promise.all([
         api('/api/orders/' + params.id),
         api('/api/products'),
         api('/api/categories'),
-        api('/api/ingredients')
+        api('/api/ingredients'),
+        api('/api/tables')
       ]);
       state.order = orderWrap.order;
       state.products = productsWrap.products.filter((p) => p.active);
       state.categories = cats.categories;
       state.ingredients = ings.ingredients || [];
-      if (String(prevId) !== String(state.order?.id)) state.categoryId = null;
+      state.tables = tablesWrap.tables;
+      if (String(prevId) !== String(state.order?.id)) {
+        state.categoryId = null;
+        state.posSearch = '';
+      }
     } else if (view === 'cocina') {
       state.kitchen = (await api('/api/orders?status=kitchen')).orders;
     } else if (view === 'facturar') {
-      const [tables, cash] = await Promise.all([api('/api/tables'), api('/api/cash/current')]);
+      const [tables, cash, invWrap] = await Promise.all([
+        api('/api/tables'),
+        api('/api/cash/current'),
+        api('/api/invoices').catch(() => ({ invoices: [] }))
+      ]);
       state.tables = tables.tables;
       state.cash = cash;
-      if (params.id) state.order = (await api('/api/orders/' + params.id)).order;
-      else state.order = null;
+      state.invoices = invWrap.invoices || [];
+      if (params.id) {
+        const prevBill = state.order?.id;
+        state.order = (await api('/api/orders/' + params.id)).order;
+        if (String(prevBill) !== String(state.order?.id)) {
+          state.billDiscount = 0;
+          state.billTip = 0;
+        }
+      } else state.order = null;
     } else if (view === 'caja') {
       const [cur, hist] = await Promise.all([api('/api/cash/current'), api('/api/cash/history')]);
       state.cash = cur;
@@ -228,12 +357,17 @@ async function loadView(silent = false) {
       state.tables = t.tables;
       state.lanUrls = info.lan_urls || [];
     }
-    if (!silent) render();
-    else render();
   } catch (e) {
-    if (e.status === 401) { state.user = null; go('login'); return; }
+    if (e.status === 401) { state.user = null; state.loading = false; go('login'); return; }
+    if (e.status === 403) {
+      toast('No tiene permiso para ver esto', true);
+      go(homeFor(state.user.role));
+      return;
+    }
     toast(e.message, true);
-    render();
+  } finally {
+    state.loading = false;
+    if (view !== 'login') render();
   }
 }
 
@@ -244,10 +378,61 @@ async function loadReports() {
   if (tab === 'products') state.reports = await api('/api/reports/products' + q);
   if (tab === 'ingredients') state.reports = await api('/api/reports/ingredients' + q);
   if (tab === 'waiters') state.reports = await api('/api/reports/waiters' + q);
+  if (tab === 'audit') state.reports = await api('/api/reports/audit' + q);
+}
+
+function playKitchenChime() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!playKitchenChime._ctx) playKitchenChime._ctx = new Ctx();
+    const ctx = playKitchenChime._ctx;
+    if (ctx.state === 'suspended') ctx.resume();
+    const now = ctx.currentTime;
+    [880, 1174].forEach((freq, i) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.12, now + 0.02 + i * 0.12);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.28 + i * 0.12);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(now + i * 0.12);
+      o.stop(now + 0.35 + i * 0.12);
+    });
+  } catch { /* sin audio no bloquea */ }
+}
+
+function exportCsv(filename, headers, rows) {
+  const escCell = (v) => {
+    const s = String(v ?? '');
+    return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [headers.map(escCell).join(';')];
+  for (const row of rows) lines.push(row.map(escCell).join(';'));
+  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function auditActionLabel(action) {
+  const map = {
+    add: 'Agregó',
+    update: 'Cambió',
+    cancel: 'Anuló',
+    note: 'Nota'
+  };
+  return map[action] || action;
 }
 
 function ico(name) {
   const paths = {
+    panel: '<rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/>',
     mesas: '<rect x="3" y="10" width="18" height="11" rx="1.5"/><path d="M5 10V7m14 3V7M12 10V4M8 21v-4m8 4v-4"/>',
     cocina: '<path d="M6 12h12v8H6z"/><path d="M9 12V8a3 3 0 016 0v4M8 20v2m8-2v2"/>',
     cobrar: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M8 14h3"/>',
@@ -263,7 +448,7 @@ function ico(name) {
   return `<svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
 }
 
-const MOBILE_PRIMARY = new Set(['mesas', 'cocina', 'facturar', 'caja']);
+const MOBILE_PRIMARY = new Set(['panel', 'mesas', 'cocina', 'facturar', 'caja']);
 
 function navBtn(i) {
   return `
@@ -285,13 +470,16 @@ function showMoreNav() {
 }
 
 function render() {
+  document.body.classList.toggle('kds-dark', state.view === 'cocina' && state.kitchenDark);
   if (!state.user || state.view === 'login') {
     state.moreNav = false;
+    document.body.classList.remove('kds-dark');
     root.innerHTML = loginView();
     bind();
     return;
   }
-  const brand = esc(state.settings.business_name || 'JR Burger');
+  const brand = esc(state.settings.business_name || state.infoName || 'Sistema');
+  const tagline = esc(state.settings.business_tagline || state.infoTagline || '');
   const all = navFor(state.user.role);
   const sideLinks = all.map(navBtn).join('');
   const useMore = all.length > 5;
@@ -316,7 +504,7 @@ function render() {
             <img src="/logo.png" alt="JR Burger" />
           </div>
           <b>${brand}</b>
-          <span>Comidas rápidas</span>
+          <span>${tagline || 'Gestión del local'}</span>
         </div>
         <div class="sidenav-links">${sideLinks}</div>
         <div class="sidenav-foot">
@@ -326,20 +514,20 @@ function render() {
       </nav>
       <header class="topbar">
         <div class="brand">
-          <div class="logo-plate sm"><img src="/logo.png" alt="JR Burger" /></div>
-          <div class="brand-copy"><b>${brand}</b><small>Comidas rápidas</small></div>
+          <div class="logo-plate sm"><img src="/logo.png" alt="${brand}" /></div>
+          <div class="brand-copy"><b>${brand}</b><small>${tagline || 'Gestión del local'}</small></div>
         </div>
         <div class="grow"></div>
         <span class="chip"><span class="live-dot"></span>${esc(state.user.name)}</span>
         <button class="icon-btn" data-act="logout" title="Salir">Salir</button>
       </header>
-      <main class="page">${viewHtml()}</main>
+      <main class="page">${state.loading ? pageLoading() : `${licenseBanner()}${setupBanner()}${viewHtml()}`}</main>
       ${morePanel}
       <nav class="bottom-nav">${bottomLinks}</nav>
     </div>`;
   paintLive();
   bind();
-  if (state.view === 'mesas') bindFloorMap();
+  if (state.view === 'mesas' && state.tablesView === 'floor') bindFloorMap();
   bindDataPanels();
 }
 
@@ -360,25 +548,81 @@ function lanAccessCard() {
 }
 
 function loginView() {
+  const brand = esc(state.infoName || 'Sistema');
+  const tag = esc(state.infoTagline || 'Sistema de gestión');
+  const lic = state.license;
+  const licBanner = lic?.expired
+    ? `<div class="alert" style="text-align:left;margin-bottom:14px">El servicio venció${lic.until ? ` el ${esc(lic.until)}` : ''}. Contacte a su proveedor${lic.vendor_phone ? `: ${esc(lic.vendor_phone)}` : ''}.</div>`
+    : (lic?.status === 'warning'
+      ? `<div class="alert" style="text-align:left;margin-bottom:14px">El servicio vence en ${lic.days_left} día(s). Avise a su proveedor.</div>`
+      : '');
   return `
   <div class="login">
     <div class="login-card card">
-      <img class="login-logo" src="/logo.png" alt="JR Burger" />
-      <h1>JR Burger</h1>
-      <p class="lede">Comidas rápidas</p>
+      <img class="login-logo" src="/logo.png" alt="${brand}" />
+      <h1>${brand}</h1>
+      <p class="lede">${tag}</p>
+      ${licBanner}
       <form data-act="login">
-        <div class="field"><label>Usuario</label><input name="username" autocomplete="username" required value="admin" /></div>
+        <div class="field"><label>Usuario</label><input name="username" autocomplete="username" required /></div>
         <div class="field"><label>Contraseña</label><input name="password" type="password" autocomplete="current-password" required /></div>
         <p id="login-error" class="danger-text" hidden></p>
         <button class="btn primary block lg" type="submit">Entrar</button>
       </form>
       ${lanAccessCard()}
+      <p class="login-foot">v${esc(lic?.app_version || '1.1.0')}</p>
     </div>
   </div>`;
 }
 
+function licenseBanner() {
+  const lic = state.license;
+  if (!lic || lic.status === 'dev') return '';
+  if (lic.expired) {
+    const contact = lic.vendor_phone
+      ? `${esc(lic.vendor_name || 'Proveedor')}: ${esc(lic.vendor_phone)}`
+      : 'Contacte a su proveedor.';
+    return `<div class="alert license-banner">El servicio de este sistema no está activo. ${contact}</div>`;
+  }
+  if (lic.status === 'warning') {
+    return `<div class="alert license-banner">Quedan ${lic.days_left} día(s) de servicio. Avise a su proveedor.</div>`;
+  }
+  return '';
+}
+
+function setupBanner() {
+  if (state.user?.role !== 'admin' || !state.setup || state.setup.completed) return '';
+  const bits = [];
+  if (state.setup.needs_password) bits.push('cambiar la contraseña de admin');
+  if (state.setup.needs_business) bits.push('poner el nombre del restaurante en Ajustes');
+  if (!bits.length) return '';
+  return `<div class="alert setup-banner">Para dejar el sistema listo: ${bits.join('; ')}.</div>`;
+}
+
+function showChangePasswordModal(forced = false) {
+  modal(`
+    <h3 style="margin-top:0">${forced ? 'Cambie su contraseña' : 'Nueva contraseña'}</h3>
+    <p class="hint">${forced ? 'Por seguridad debe crear una contraseña nueva antes de usar el sistema.' : 'Mínimo 6 caracteres.'}</p>
+    <form data-act="change-password">
+      <div class="field"><label>Contraseña actual</label><input name="current" type="password" required autocomplete="current-password" /></div>
+      <div class="field"><label>Nueva contraseña</label><input name="password" type="password" required minlength="6" autocomplete="new-password" /></div>
+      <div class="field"><label>Repita la nueva</label><input name="password2" type="password" required minlength="6" autocomplete="new-password" /></div>
+      <button class="btn primary block" type="submit">Guardar contraseña</button>
+      ${forced ? '' : '<button type="button" class="btn ghost block" data-act="close-modal" style="margin-top:8px">Cancelar</button>'}
+    </form>`);
+  if (forced) {
+    modalRoot.onclick = (e) => {
+      if (e.target === modalRoot) return;
+      const actEl = e.target.closest('[data-act]');
+      if (actEl && actEl.dataset.act === 'close-modal') return;
+      if (actEl && actEl.tagName !== 'FORM') onClick(e);
+    };
+  }
+}
+
 function viewHtml() {
   switch (state.view) {
+    case 'panel': return panelView();
     case 'mesas': return mesasView();
     case 'comanda': return orderView();
     case 'cocina': return kitchenView();
@@ -400,6 +644,130 @@ function pageHead(title, lede, actions = '') {
   </div>`;
 }
 
+function greetingLine() {
+  const h = new Date().getHours();
+  if (h < 12) return 'Buenos días';
+  if (h < 19) return 'Buenas tardes';
+  return 'Buenas noches';
+}
+
+function deltaBadge(pct) {
+  const n = Number(pct) || 0;
+  if (!n) return `<span class="delta flat">= ayer</span>`;
+  const up = n > 0;
+  return `<span class="delta ${up ? 'up' : 'down'}">${up ? '▲' : '▼'} ${Math.abs(n)}% vs ayer</span>`;
+}
+
+function panelView() {
+  const d = state.dashboard || {};
+  const today = d.today || {};
+  const week = d.week || {};
+  const tables = d.tables || {};
+  const cash = d.cash || {};
+  const name = esc(state.user?.name || 'Administrador');
+  const brand = esc(state.settings.business_name || state.infoName || 'Restaurante');
+  const methods = d.methods || [];
+  const methodTotal = methods.reduce((s, m) => s + Number(m.total || 0), 0) || 1;
+  const alerts = d.stock_alerts || [];
+  const recent = d.recent_invoices || [];
+
+  return `
+  <div class="dash">
+    ${pageHead(
+      `${greetingLine()}, ${name}`,
+      `${brand} · resumen de hoy ${esc(today.date || today())}`,
+      `<button type="button" class="btn ghost" data-act="nav" data-view="reportes">Ver informes</button>
+       <button type="button" class="btn primary" data-act="nav" data-view="mesas">Ir a mesas</button>`
+    )}
+
+    <div class="dash-kpis">
+      <article class="dash-kpi primary">
+        <span class="dash-kpi-label">Ventas de hoy</span>
+        <b class="dash-kpi-value">${money(today.total)}</b>
+        <div class="dash-kpi-meta">${today.tickets || 0} cuentas · ticket prom. ${money(today.avg_ticket)}</div>
+        ${deltaBadge(today.vs_yesterday_pct)}
+      </article>
+      <article class="dash-kpi">
+        <span class="dash-kpi-label">Últimos 7 días</span>
+        <b class="dash-kpi-value">${money(week.total)}</b>
+        <div class="dash-kpi-meta">${week.tickets || 0} cuentas cobradas</div>
+      </article>
+      <article class="dash-kpi">
+        <span class="dash-kpi-label">En salón ahora</span>
+        <b class="dash-kpi-value">${money(d.open_sales)}</b>
+        <div class="dash-kpi-meta">${d.salon?.open_orders || 0} cuentas abiertas · ${tables.waiting_payment || 0} por cobrar</div>
+      </article>
+      <article class="dash-kpi ${cash.open ? 'ok' : 'warn'}">
+        <span class="dash-kpi-label">Caja</span>
+        <b class="dash-kpi-value">${cash.open ? money(cash.summary?.sales) : 'Cerrada'}</b>
+        <div class="dash-kpi-meta">${cash.open
+          ? `Turno abierto · efectivo esp. ${money(cash.summary?.expected_cash)}`
+          : 'Abra la caja para cobrar'}</div>
+        <button type="button" class="btn ghost sm" data-act="nav" data-view="caja" style="margin-top:10px">${cash.open ? 'Ver caja' : 'Abrir caja'}</button>
+      </article>
+    </div>
+
+    <div class="dash-grid">
+      <section class="dash-main">
+        ${salesChartHtml(d.daily)}
+        <div class="card dash-pay">
+          <div class="ticket-head">Pagos de hoy</div>
+          ${methods.length ? methods.map((m) => {
+            const pct = Math.max(4, Math.round((Number(m.total) || 0) / methodTotal * 100));
+            return `<div class="dash-pay-row">
+              <div class="between"><span>${PAY[m.method] || esc(m.method)}</span><b>${money(m.total)}</b></div>
+              <div class="dash-pay-bar"><i style="width:${pct}%"></i></div>
+            </div>`;
+          }).join('') : '<p class="hint">Aún no hay cobros hoy.</p>'}
+        </div>
+        <div class="card">
+          <div class="between" style="margin-bottom:10px">
+            <div class="ticket-head" style="margin:0">Últimas cuentas</div>
+            <button type="button" class="btn ghost sm" data-act="nav" data-view="facturar">Cobrar</button>
+          </div>
+          ${recent.length ? `<table class="table dash-table"><thead><tr><th>#</th><th>Mesa</th><th>Hora</th><th>Total</th></tr></thead>
+            <tbody>${recent.map((inv) => `
+              <tr>
+                <td>${esc(inv.number)}</td>
+                <td>${esc(inv.table_name || '—')}</td>
+                <td>${esc(String(inv.created_at || '').slice(11, 16))}</td>
+                <td><b>${money(inv.total)}</b></td>
+              </tr>`).join('')}</tbody></table>`
+            : '<p class="hint">Sin cobros recientes.</p>'}
+        </div>
+      </section>
+
+      <aside class="dash-side">
+        <div class="card">
+          <div class="ticket-head">Salón</div>
+          <div class="dash-salon">
+            <div><b>${tables.free || 0}</b><span>Libres</span></div>
+            <div><b>${tables.occupied || 0}</b><span>Ocupadas</span></div>
+            <div><b>${tables.waiting_payment || 0}</b><span>Por cobrar</span></div>
+            <div><b>${d.kitchen_pending || 0}</b><span>En cocina</span></div>
+          </div>
+          <div class="dash-actions">
+            <button type="button" class="btn primary block" data-act="nav" data-view="mesas">Mesas</button>
+            <button type="button" class="btn ghost block" data-act="nav" data-view="cocina">Cocina</button>
+            <button type="button" class="btn ghost block" data-act="nav" data-view="facturar">Cobrar</button>
+          </div>
+        </div>
+        ${productsChartHtml(d.top_products)}
+        <div class="card ${alerts.length ? 'dash-alert' : ''}">
+          <div class="between" style="margin-bottom:8px">
+            <div class="ticket-head" style="margin:0">Inventario bajo</div>
+            <button type="button" class="btn ghost sm" data-act="nav" data-view="inventario">Ver</button>
+          </div>
+          ${alerts.length
+            ? `<ul class="dash-stock">${alerts.map((a) => `
+                <li><span>${esc(a.name)}</span><b>${Number(a.stock)} ${esc(a.unit || '')}</b></li>`).join('')}</ul>`
+            : '<p class="hint">Todo el stock está en rango.</p>'}
+        </div>
+      </aside>
+    </div>
+  </div>`;
+}
+
 function mesasView() {
   const picking = !!(state.joinFrom || state.transferFrom);
   if (picking) state.floorEdit = false;
@@ -413,12 +781,17 @@ function mesasView() {
     waiting_payment: state.tables.filter((t) => t.status === 'waiting_payment').length,
     reserved: state.tables.filter((t) => t.status === 'reserved').length
   };
-  const editBtn = picking
+  const isList = state.tablesView === 'list';
+  const editBtn = picking || isList
     ? ''
     : `<button type="button" class="btn ${state.floorEdit ? 'primary' : 'ghost'}" data-act="toggle-floor-edit">${state.floorEdit ? 'Listo' : 'Editar plano'}</button>`;
+  const viewToggle = picking ? '' : `
+    <button type="button" class="btn ${!isList ? 'primary' : 'ghost'}" data-act="tables-view" data-mode="floor">Plano</button>
+    <button type="button" class="btn ${isList ? 'primary' : 'ghost'}" data-act="tables-view" data-mode="list">Lista</button>`;
   const placed = floorPositions(state.tables);
+  const sorted = [...state.tables].sort((a, b) => String(a.name).localeCompare(String(b.name), 'es', { numeric: true }));
   return `
-    ${pageHead('Mesas', mode, editBtn)}
+    ${pageHead('Mesas', mode, `${viewToggle}${editBtn}`)}
     ${(state.alerts || []).length ? `<div class="alert">Se está acabando: ${state.alerts.map((a) => esc(a.name)).join(', ')}</div>` : ''}
     <div class="legend">
       <span><i class="pip free"></i> Libre (${counts.free})</span>
@@ -426,10 +799,12 @@ function mesasView() {
       <span><i class="pip wait"></i> Por cobrar (${counts.waiting_payment})</span>
       <span><i class="pip reserved"></i> Reservada (${counts.reserved})</span>
     </div>
-    <div class="floor-map ${state.floorEdit ? 'is-editing' : ''} ${picking ? 'pick-mode' : ''}" id="floor-map">
+    ${isList
+      ? `<div class="grid tables-grid">${sorted.map(tableCard).join('') || '<div class="empty card">No hay mesas</div>'}</div>`
+      : `<div class="floor-map ${state.floorEdit ? 'is-editing' : ''} ${picking ? 'pick-mode' : ''}" id="floor-map">
       <div class="floor-label" aria-hidden="true">Salón</div>
       ${placed.map((t) => floorTable(t)).join('')}
-    </div>
+    </div>`}
     <div class="actions-fab">
       <button class="btn ghost" data-act="cancel-mode" ${picking ? '' : 'hidden'}>Cancelar</button>
     </div>`;
@@ -512,23 +887,35 @@ function orderView() {
   const o = state.order;
   if (!o) return '<p>No se encontró el pedido</p>';
   const active = o.items.filter((i) => i.status !== 'cancelled');
-  const browsing = state.categoryId == null || state.categoryId === '';
+  const q = (state.posSearch || '').trim().toLowerCase();
+  const browsing = !q && (state.categoryId == null || state.categoryId === '');
   const cat = browsing ? null : state.categories.find((c) => String(c.id) === String(state.categoryId));
-  const products = browsing
-    ? []
-    : state.products.filter((p) => String(p.category_id) === String(state.categoryId));
+  const products = q
+    ? state.products.filter((p) => String(p.name || '').toLowerCase().includes(q))
+    : (browsing ? [] : state.products.filter((p) => String(p.category_id) === String(state.categoryId)));
   const unsent = active.filter((i) => !i.sent).length;
   const billed = ['billed', 'cancelled'].includes(o.status);
-  const backAct = browsing
-    ? 'data-act="nav" data-view="mesas"'
-    : 'data-act="cat-home"';
-  const title = browsing ? esc(o.table_name) : esc(cat?.name || 'Grupo');
-  const subtitle = browsing
-    ? `#${o.id} · ${esc(o.waiter_name)} · elija un grupo`
-    : `#${o.id} · ${products.length} producto${products.length === 1 ? '' : 's'}`;
+  const joinedTables = (state.tables || []).filter((t) => t.joined_to_id === o.table_id);
+  const backAct = q ? 'data-act="pos-clear-search"' : (browsing ? 'data-act="nav" data-view="mesas"' : 'data-act="cat-home"');
+  const title = q ? 'Buscar' : (browsing ? esc(o.table_name) : esc(cat?.name || 'Grupo'));
+  const subtitle = q
+    ? `${products.length} resultado${products.length === 1 ? '' : 's'}`
+    : (browsing
+      ? `#${o.id} · ${esc(o.waiter_name)} · elija un grupo`
+      : `#${o.id} · ${products.length} producto${products.length === 1 ? '' : 's'}`);
 
-  const body = browsing
-    ? `<div class="pos-groups">
+  const productGrid = (list) => `<div class="pos-menu">
+    ${list.map((p) => `
+      <button type="button" class="pos-item" data-act="add-prod" data-id="${p.id}">
+        <span class="pos-item-name">${esc(p.name)}</span>
+        <span class="pos-item-price">${money(p.price)}</span>
+      </button>
+    `).join('') || `<div class="empty">${q ? 'No hay productos con ese nombre' : 'No hay productos en este grupo'}</div>`}
+  </div>`;
+
+  const body = q || !browsing
+    ? productGrid(products)
+    : `<div class="pos-groups">
         ${(state.categories || []).map((c) => {
           const count = state.products.filter((p) => String(p.category_id) === String(c.id)).length;
           return `
@@ -541,14 +928,6 @@ function orderView() {
               <span class="pos-group-go">›</span>
             </button>`;
         }).join('') || '<div class="empty">No hay grupos en el menú</div>'}
-      </div>`
-    : `<div class="pos-menu">
-        ${products.map((p) => `
-          <button type="button" class="pos-item" data-act="add-prod" data-id="${p.id}">
-            <span class="pos-item-name">${esc(p.name)}</span>
-            <span class="pos-item-price">${money(p.price)}</span>
-          </button>
-        `).join('') || '<div class="empty">No hay productos en este grupo</div>'}
       </div>`;
 
   return `
@@ -560,6 +939,7 @@ function orderView() {
             <h1>${title}</h1>
             <p>${subtitle}</p>
           </div>
+          ${!billed ? `<input id="pos-search" type="search" class="pos-search" placeholder="Buscar producto…" value="${esc(state.posSearch)}" autocomplete="off" />` : ''}
         </header>
         ${body}
       </div>
@@ -590,11 +970,12 @@ function orderView() {
         </div>
         <div class="pos-ticket-foot">
           <div class="pos-total"><span>Total</span><b>${money(o.subtotal)}</b></div>
-          <button type="button" class="btn primary block lg" data-act="send-order" ${unsent ? '' : 'disabled'}>Enviar a cocina (${unsent})</button>
+          <button type="button" class="btn primary block lg${state.busy === 'send' ? ' is-busy' : ''}" data-act="send-order" ${!unsent || state.busy ? 'disabled' : ''}>${state.busy === 'send' ? 'Enviando…' : `Enviar a cocina (${unsent})`}</button>
           <button type="button" class="btn gold block" data-act="wait-pay">Pedir cuenta</button>
           <div class="pos-ticket-extra">
             <button type="button" class="btn ghost" data-act="join-mode">Juntar</button>
             <button type="button" class="btn ghost" data-act="transfer-mode">Pasar</button>
+            ${joinedTables.length ? `<button type="button" class="btn ghost" data-act="split-tables">Separar (${joinedTables.length})</button>` : ''}
           </div>
           ${billed ? '' : `<button type="button" class="btn danger block" data-act="cancel-order">${active.length ? 'Cancelar cuenta' : 'Liberar mesa'}</button>`}
         </div>
@@ -607,27 +988,34 @@ function orderView() {
         <span>${active.length} prod.</span>
         <b>${money(o.subtotal)}</b>
       </button>
-      <button type="button" class="btn primary" data-act="send-order" ${unsent ? '' : 'disabled'}>Enviar${unsent ? ` (${unsent})` : ''}</button>
+      <button type="button" class="btn primary${state.busy === 'send' ? ' is-busy' : ''}" data-act="send-order" ${!unsent || state.busy ? 'disabled' : ''}>${state.busy === 'send' ? 'Enviando…' : `Enviar${unsent ? ` (${unsent})` : ''}`}</button>
     </div>`}`;
 }
 
 function kitchenView() {
-  const orders = state.kitchen.filter((o) => {
-    const items = o.items.filter((i) => i.sent && i.status !== 'cancelled');
-    if (!items.length) return false;
-    if (state.station === 'all') return true;
-    return items.some((i) => {
-      const p = null;
-      return true;
-    });
-  });
+  const tabs = `
+    <div class="tabs kds-tabs">
+      <button type="button" data-act="kds-station" data-st="all" class="${state.station === 'all' ? 'on' : ''}">Todo</button>
+      <button type="button" data-act="kds-station" data-st="kitchen" class="${state.station === 'kitchen' ? 'on' : ''}">Cocina</button>
+      <button type="button" data-act="kds-station" data-st="bar" class="${state.station === 'bar' ? 'on' : ''}">Barra</button>
+    </div>`;
   const filtered = state.kitchen.map((o) => ({
     ...o,
-    items: o.items.filter((i) => i.sent && i.status !== 'cancelled')
+    items: o.items.filter((i) => {
+      if (!i.sent || i.status === 'cancelled') return false;
+      if (state.station === 'all') return true;
+      return (i.station || 'kitchen') === state.station;
+    })
   })).filter((o) => o.items.length);
 
+  const actions = `
+    <button type="button" class="btn ghost" data-act="toggle-kitchen-sound">${state.kitchenSound ? 'Sonido: sí' : 'Sonido: no'}</button>
+    <button type="button" class="btn ghost" data-act="toggle-kitchen-dark">${state.kitchenDark ? 'Modo: oscuro' : 'Modo: claro'}</button>
+    <button type="button" class="btn ghost" data-act="kitchen-fullscreen">${document.fullscreenElement ? 'Salir pantalla' : 'Pantalla completa'}</button>`;
+
   return `
-    ${pageHead('Cocina', 'Aquí salen los pedidos en cuanto el mesero los envía.')}
+    ${pageHead('Cocina', 'Pedidos en vivo por estación.', actions)}
+    ${tabs}
     <div class="kds">
       ${filtered.map((o) => {
         const wait = minutesAgo(o.updated_at || o.created_at);
@@ -664,11 +1052,54 @@ function kitchenView() {
 }
 
 function billingView() {
-  const payable = state.tables.filter((t) => t.order && !t.joined_to_id);
+  const payable = state.tables
+    .filter((t) => t.order && !t.joined_to_id)
+    .sort((a, b) => {
+      if (a.status === 'waiting_payment' && b.status !== 'waiting_payment') return -1;
+      if (b.status === 'waiting_payment' && a.status !== 'waiting_payment') return 1;
+      return 0;
+    });
   const openCash = state.cash?.register;
   if (state.order) return billForm(state.order, openCash);
+
+  const tabs = `
+    <div class="tabs">
+      <button type="button" data-act="bill-tab" data-tab="pending" class="${state.billingTab === 'pending' ? 'on' : ''}">Por cobrar</button>
+      <button type="button" data-act="bill-tab" data-tab="history" class="${state.billingTab === 'history' ? 'on' : ''}">Historial</button>
+    </div>`;
+
+  if (state.billingTab === 'history') {
+    const rows = (state.invoices || []).map((inv) => ({
+      search: `#${inv.number} ${inv.table_name} ${inv.cashier_name} ${inv.total} ${inv.created_at}`,
+      html: `<div class="card inv-row">
+        <div class="grow">
+          <b>Ticket #${inv.number}</b> · ${esc(inv.table_name)}
+          <div class="small muted">${esc(inv.created_at)} · ${esc(inv.cashier_name)} · ${money(inv.total)}</div>
+        </div>
+        <span class="badge ${inv.status === 'cancelled' ? 'reserved' : 'free'}">${inv.status === 'cancelled' ? 'Anulado' : 'Cobrado'}</span>
+        <div class="actions">
+          ${inv.status === 'paid' ? `<button type="button" class="btn ghost" data-act="reprint-inv" data-id="${inv.id}">Reimprimir</button>` : ''}
+          ${inv.status === 'paid' ? `<button type="button" class="btn danger" data-act="void-inv" data-id="${inv.id}">Anular</button>` : ''}
+        </div>
+      </div>`
+    }));
+    return `
+      ${pageHead('Cobrar', 'Ventas ya registradas. Puede reimprimir o anular un ticket.')}
+      ${tabs}
+      ${!openCash ? '<div class="alert">Abra la caja para anular tickets.</div>' : ''}
+      ${dataPanel({
+        id: 'inv-history',
+        mode: 'cards',
+        searchPlaceholder: 'Buscar ticket, mesa o cajero…',
+        pageSize: 12,
+        rows,
+        empty: 'Todavía no hay ventas registradas'
+      })}`;
+  }
+
   return `
     ${pageHead('Cobrar', 'Mesas que todavía no han pagado. Si pidieron la cuenta, se ven en amarillo.')}
+    ${tabs}
     ${!openCash ? '<div class="alert">Primero abra la caja para poder cobrar.</div>' : ''}
     <div class="grid tables-grid">
       ${payable.map(tableCard).join('') || '<div class="empty card">Nada por cobrar ahora.</div>'}
@@ -680,9 +1111,13 @@ function billForm(o, openCash) {
   const taxRate = Number(state.settings.tax_rate || 0);
   const included = state.settings.tax_included;
   const subtotal = o.subtotal;
-  let tax = 0, total = subtotal;
-  if (taxRate > 0 && !included) { tax = Math.round(subtotal * taxRate / 100); total = subtotal + tax; }
-  else if (taxRate > 0 && included) tax = Math.round(subtotal - subtotal / (1 + taxRate / 100));
+  const discount = Math.min(Math.max(0, Math.round(Number(state.billDiscount) || 0)), Math.round(subtotal));
+  const tip = Math.max(0, Math.round(Number(state.billTip) || 0));
+  const base = Math.max(0, subtotal - discount);
+  let tax = 0, total = base;
+  if (taxRate > 0 && !included) { tax = Math.round(base * taxRate / 100); total = base + tax; }
+  else if (taxRate > 0 && included) tax = Math.round(base - base / (1 + taxRate / 100));
+  total = Math.round(total + tip);
   return `
     ${pageHead('Cobrar ' + esc(o.table_name), '', `<button class="btn ghost" data-act="nav" data-view="facturar">Volver</button>`)}
     ${!openCash ? '<div class="alert">Primero abra la caja.</div>' : ''}
@@ -691,11 +1126,17 @@ function billForm(o, openCash) {
         <div class="ticket-head">Lo que pidieron</div>
         ${active.map((i) => `<div class="ticket-line"><span>${i.quantity}× ${esc(i.product_name)}${modsText(i) ? `<div class="notes">${esc(modsText(i))}</div>` : ''}</span><span class="line-amt">${money(i.quantity * i.unit_price)}</span></div>`).join('')}
         <div class="between muted"><span>Suma</span><span>${money(subtotal)}</span></div>
+        ${discount ? `<div class="between muted"><span>Descuento</span><span>-${money(discount)}</span></div>` : ''}
         ${taxRate ? `<div class="between muted"><span>IVA ${taxRate}%${included ? ' (incluido)' : ''}</span><span>${money(tax)}</span></div>` : ''}
+        ${tip ? `<div class="between muted"><span>Propina</span><span>${money(tip)}</span></div>` : ''}
         <div class="ticket-total"><span>Total</span><b>${money(total)}</b></div>
       </div>
       <form class="card" data-act="invoice" data-total="${total}" data-oid="${o.id}">
         <div class="ticket-head">Cómo pagan</div>
+        <div class="field"><label>Descuento ($)</label>
+          <input type="number" min="0" step="1" name="discount" data-act="bill-adj" data-field="discount" value="${discount}" /></div>
+        <div class="field"><label>Propina ($)</label>
+          <input type="number" min="0" step="1" name="tip" data-act="bill-adj" data-field="tip" value="${tip}" /></div>
         <p class="small muted">Puede mezclar efectivo, Nequi y Daviplata. Junto debe alcanzar para el total. Si en efectivo dan de más, el vuelto no entra a la caja como venta.</p>
         <div class="pay-tiles">
           ${Object.entries(PAY).map(([k, lab]) => `
@@ -704,7 +1145,7 @@ function billForm(o, openCash) {
               <input type="number" min="0" step="1" name="${k}" value="${k === 'efectivo' ? Math.round(total) : 0}" />
             </label>`).join('')}
         </div>
-        <button class="btn primary block lg" ${openCash ? '' : 'disabled'}>Cobrar e imprimir recibo</button>
+        <button type="submit" class="btn primary block lg${state.busy === 'invoice' ? ' is-busy' : ''}" ${!openCash || state.busy ? 'disabled' : ''}>${state.busy === 'invoice' ? 'Cobrando…' : 'Cobrar e imprimir recibo'}</button>
       </form>
     </div>`;
 }
@@ -735,19 +1176,21 @@ function cashView() {
   const salon = state.cash?.salon;
   if (!r) {
     return `
-      ${pageHead('Caja', 'Apertura y cierre del turno. Sin caja abierta no se puede cobrar.')}
+      ${pageHead('Caja', 'Apertura y cierre del turno. Sin caja abierta no se puede cobrar.', `<button type="button" class="btn ghost" data-act="bill-history">Ver ventas</button>`)}
       <form class="card form-narrow" data-act="open-cash">
         <div class="ticket-head">Apertura de caja</div>
         <p class="hint">Cuente el efectivo del cajón (base) y anótelo. Ese valor es el punto de partida del arqueo.</p>
         <div class="field"><label>Base (efectivo al abrir)</label><input name="opening_amount" type="number" min="0" step="1" required /></div>
-        <button class="btn primary block lg">Abrir caja</button>
+        <button type="submit" class="btn primary block lg${state.busy === 'cash-open' ? ' is-busy' : ''}" ${state.busy ? 'disabled' : ''}>${state.busy === 'cash-open' ? 'Abriendo…' : 'Abrir caja'}</button>
       </form>
       ${salonResetCard(salon)}
       ${cashHistory()}`;
   }
   const moves = s?.moves || [];
   return `
-    ${pageHead('Caja', `Turno abierto por ${esc(r.opened_by_name)} · ${esc(r.opened_at)}`, `<button class="btn ghost" type="button" data-act="print-cash" data-id="${r.id}">Ticket de apertura</button>`)}
+    ${pageHead('Caja', `Turno abierto por ${esc(r.opened_by_name)} · ${esc(r.opened_at)}`, `
+      <button class="btn ghost" type="button" data-act="bill-history">Ver ventas</button>
+      <button class="btn ghost" type="button" data-act="print-cash" data-id="${r.id}">Ticket de apertura</button>`)}
     ${salon?.open_orders || salon?.occupied_tables
       ? `<div class="alert">Hay ${salon.open_orders || 0} cuenta(s) y ${salon.occupied_tables || 0} mesa(s) ocupada(s). Cóbrelas o reinicie el salón antes de cerrar.</div>` : ''}
     <div class="grid stats">
@@ -764,14 +1207,14 @@ function cashView() {
         <p class="hint">Sale del efectivo del cajón (pan, gas, vuelto a un proveedor…).</p>
         <div class="field"><label>Valor</label><input name="amount" type="number" min="1" required /></div>
         <div class="field"><label>¿En qué se gastó?</label><input name="description" placeholder="Pan, gas, etc." /></div>
-        <button class="btn ghost">Guardar gasto</button>
+        <button type="submit" class="btn ghost${state.busy === 'expense' ? ' is-busy' : ''}" ${state.busy ? 'disabled' : ''}>${state.busy === 'expense' ? 'Guardando…' : 'Guardar gasto'}</button>
       </form>
       <form class="card" data-act="close-cash">
         <div class="ticket-head">Cierre de caja</div>
         <p class="hint">Cuente el efectivo. El sistema compara con la base + ventas en efectivo − gastos.</p>
         <div class="field"><label>¿Cuánto efectivo hay ahora?</label><input name="counted_cash" type="number" min="0" required /></div>
         <div class="field"><label>Nota (si quiere)</label><input name="notes" /></div>
-        <button class="btn danger block">Cerrar caja</button>
+        <button type="submit" class="btn danger block${state.busy === 'cash-close' ? ' is-busy' : ''}" ${state.busy ? 'disabled' : ''}>${state.busy === 'cash-close' ? 'Cerrando…' : 'Cerrar caja'}</button>
       </form>
     </div>
     <h3 class="section-title">Movimientos de este turno</h3>
@@ -830,6 +1273,7 @@ function inventoryView() {
           <div class="small muted">Avisar cuando queden ${i.min_stock}</div>
           <div class="row" style="margin-top:12px">
             <button class="btn" data-act="move-ing" data-id="${i.id}" data-type="purchase">Reponer</button>
+            <button class="btn ghost" data-act="move-ing" data-id="${i.id}" data-type="waste">Se botó</button>
             <button class="btn ghost" data-act="move-ing" data-id="${i.id}" data-type="adjustment">Corregir</button>
             <button class="btn ghost" data-act="edit-ing" data-id="${i.id}">Editar</button>
             <button class="btn danger" data-act="del-ing" data-id="${i.id}">Borrar</button>
@@ -960,9 +1404,53 @@ function usersView() {
     })}`;
 }
 
+function salesChartHtml(daily) {
+  const rows = (daily || []).slice(-14);
+  if (!rows.length) return '';
+  const max = Math.max(...rows.map((d) => Number(d.total) || 0), 1);
+  return `
+    <div class="chart-card card">
+      <div class="ticket-head">Ventas por día</div>
+      <div class="chart-bars" role="img" aria-label="Gráfico de ventas diarias">
+        ${rows.map((d) => {
+          const pct = Math.max(4, Math.round((Number(d.total) || 0) / max * 100));
+          const day = String(d.day || '').slice(5);
+          return `<div class="chart-col" title="${esc(d.day)}: ${money(d.total)}">
+            <div class="chart-bar" style="height:${pct}%"></div>
+            <span class="chart-label">${esc(day)}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function productsChartHtml(products) {
+  const rows = (products || []).slice(0, 5);
+  if (!rows.length) return '';
+  const max = Math.max(...rows.map((p) => Number(p.qty) || 0), 1);
+  return `
+    <div class="chart-card card">
+      <div class="ticket-head">Top 5 productos</div>
+      <div class="chart-hbar" role="img" aria-label="Top productos">
+        ${rows.map((p, i) => {
+          const pct = Math.max(8, Math.round((Number(p.qty) || 0) / max * 100));
+          return `<div class="chart-hrow">
+            <span class="chart-hrank">${i + 1}</span>
+            <div class="chart-htrack">
+              <div class="chart-hfill" style="width:${pct}%"></div>
+              <span class="chart-hname">${esc(p.product_name || p.name)}</span>
+            </div>
+            <span class="chart-hval">${p.qty}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
 function reportsView() {
   const tabs = [
-    ['sales', 'Ventas'], ['products', 'Lo más pedido'], ['ingredients', 'Ingredientes'], ['waiters', 'Meseros']
+    ['sales', 'Ventas'], ['products', 'Lo más pedido'], ['ingredients', 'Ingredientes'],
+    ['waiters', 'Meseros'], ['audit', 'Auditoría']
   ];
   let body = '';
   const r = state.reports || {};
@@ -972,6 +1460,7 @@ function reportsView() {
         <div class="stat"><span>Cuentas</span><b>${r.totals?.tickets || 0}</b></div>
         <div class="stat"><span>Total</span><b>${money(r.totals?.total)}</b></div>
       </div>
+      ${salesChartHtml(r.daily)}
       ${dataPanel({
         id: 'rep-sales',
         searchPlaceholder: 'Buscar día…',
@@ -986,7 +1475,9 @@ function reportsView() {
       <h3 class="section-title">Cómo pagaron</h3>
       ${(r.methods || []).map((m) => `<div class="between card" style="margin-bottom:8px"><span>${PAY[m.method] || m.method}</span><b>${money(m.total)}</b></div>`).join('') || '<p class="hint">Sin pagos en el rango</p>'}`;
   } else if (state.reportTab === 'products') {
-    body = dataPanel({
+    body = `
+      ${productsChartHtml(r.products)}
+      ${dataPanel({
       id: 'rep-products',
       searchPlaceholder: 'Buscar producto…',
       pageSize: 12,
@@ -996,7 +1487,7 @@ function reportsView() {
         html: `<tr><td>${esc(p.product_name || p.name)}</td><td>${p.qty}</td><td>${money(p.total)}</td></tr>`
       })),
       empty: 'Sin datos'
-    });
+    })}`;
   } else if (state.reportTab === 'ingredients') {
     body = dataPanel({
       id: 'rep-ings',
@@ -1008,6 +1499,33 @@ function reportsView() {
         html: `<tr><td>${esc(i.name)}</td><td>${i.consumed} ${esc(i.unit)}</td></tr>`
       })),
       empty: 'Sin datos'
+    });
+  } else if (state.reportTab === 'audit') {
+    body = dataPanel({
+      id: 'rep-audit',
+      searchPlaceholder: 'Buscar persona, producto o mesa…',
+      pageSize: 15,
+      head: '<tr><th>Cuándo</th><th>Quién</th><th>Acción</th><th>Producto</th><th>Mesa</th><th>Detalle</th></tr>',
+      rows: (r.audit || []).map((a) => {
+        let detail = '';
+        try {
+          const d = typeof a.details === 'string' ? JSON.parse(a.details || '{}') : (a.details || {});
+          detail = d.reason || d.notes || (d.quantity != null ? `Cant. ${d.quantity}` : JSON.stringify(d));
+          if (detail === '{}') detail = '';
+        } catch { detail = String(a.details || ''); }
+        return {
+          search: `${a.user_name} ${a.product_name} ${a.table_name} ${a.action} ${detail}`,
+          html: `<tr>
+            <td>${esc(a.created_at)}</td>
+            <td>${esc(a.user_name)}</td>
+            <td>${esc(auditActionLabel(a.action))}</td>
+            <td>${a.quantity || ''}× ${esc(a.product_name)}</td>
+            <td>${esc(a.table_name)} · #${a.order_id}</td>
+            <td>${esc(detail)}</td>
+          </tr>`
+        };
+      }),
+      empty: 'Sin cambios registrados en el rango'
     });
   } else {
     body = dataPanel({
@@ -1023,8 +1541,14 @@ function reportsView() {
     });
   }
   return `
-    ${pageHead('Informes', 'Vea las ventas, lo más pedido, los ingredientes y el trabajo de cada mesero.')}
+    ${pageHead('Informes', 'Ventas, productos, ingredientes, meseros y auditoría de cambios.', `<button type="button" class="btn ghost" data-act="export-csv">Exportar CSV</button>`)}
     <div class="toolbar card">
+      <div class="row" style="flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <button type="button" class="btn ghost" data-act="date-preset" data-preset="today">Hoy</button>
+        <button type="button" class="btn ghost" data-act="date-preset" data-preset="yesterday">Ayer</button>
+        <button type="button" class="btn ghost" data-act="date-preset" data-preset="week">7 días</button>
+        <button type="button" class="btn ghost" data-act="date-preset" data-preset="month">30 días</button>
+      </div>
       <div class="field"><label>Desde</label><input type="date" data-act="from" value="${state.from}" /></div>
       <div class="field"><label>Hasta</label><input type="date" data-act="to" value="${state.to}" /></div>
     </div>
@@ -1035,10 +1559,12 @@ function reportsView() {
 function configView() {
   const s = state.settings;
   return `
-    ${pageHead('Ajustes', 'Nombre del restaurante, impresora, mesas y copias de los datos.')}
+    ${pageHead('Ajustes', 'Datos del restaurante, impresora y copias.')}
     <div class="settings-grid">
     <form class="card" data-act="save-settings">
-      <div class="field"><label>Nombre del restaurante</label><input name="business_name" value="${esc(s.business_name || '')}" /></div>
+      <div class="ticket-head">Datos del negocio</div>
+      <div class="field"><label>Nombre del restaurante</label><input name="business_name" value="${esc(s.business_name || '')}" required /></div>
+      <div class="field"><label>Eslogan / subtítulo</label><input name="business_tagline" value="${esc(s.business_tagline || '')}" placeholder="Ej. Comidas rápidas" /></div>
       <div class="field"><label>NIT</label><input name="business_nit" value="${esc(s.business_nit || '')}" /></div>
       <div class="field"><label>Dirección</label><input name="business_address" value="${esc(s.business_address || '')}" /></div>
       <div class="field"><label>Teléfono</label><input name="business_phone" value="${esc(s.business_phone || '')}" /></div>
@@ -1066,26 +1592,36 @@ function configView() {
     </form>
     <div>
     <div class="card">
+      <div class="ticket-head">Cuenta</div>
+      <p class="hint">Cambie su contraseña de acceso.</p>
+      <button type="button" class="btn ghost" data-act="change-pass-self">Cambiar mi contraseña</button>
+    </div>
+    <div class="card" style="margin-top:14px">
       <div class="ticket-head">Impresora y copias</div>
       <div class="row">
         <button class="btn ghost" data-act="print-test">Probar recibo</button>
         <button class="btn sage" data-act="backup">Guardar copia</button>
       </div>
       <p class="hint" style="margin-top:12px">Las copias quedan en la carpeta backups. Al encender el sistema se guarda una sola.</p>
-      <ul class="backup-list">${(state.backups || []).map((b) => `<li>${esc(b.filename)}</li>`).join('') || '<li>Todavía no hay copias</li>'}</ul>
+      <ul class="backup-list">${(state.backups || []).map((b) => `
+        <li class="backup-item">
+          <span>${esc(b.filename)}</span>
+          <button type="button" class="btn ghost" data-act="restore-backup" data-file="${esc(b.filename)}">Restaurar</button>
+        </li>`).join('') || '<li>Todavía no hay copias</li>'}
+      </ul>
+      <p class="small muted">Restaurar pide reiniciar el sistema (cerrar la ventana e iniciar.bat). Antes se guarda una copia de seguridad.</p>
     </div>
     ${/^(localhost|127\.0\.0\.1)$/i.test(location.hostname) ? `
     <div class="card" style="margin-top:14px">
       <div class="ticket-head">Acceso desde el celular</div>
       ${lanAccessCard()}
     </div>` : ''}
-    ${salonResetCard({ open_orders: (state.tables || []).filter((t) => t.order).length, occupied_tables: (state.tables || []).filter((t) => t.order || t.status === 'occupied' || t.status === 'waiting_payment').length })}
-    <div class="card danger-zone" style="margin-top:14px">
-      <div class="ticket-head">Instalar en el restaurante</div>
-      <p class="hint">Borra ventas, caja, historial de inventario y usuarios que no sean admin. <b>Conserva el menú</b> (grupos, productos, ingredientes y recetas) y las mesas. El stock queda en 0 para que ustedes lo carguen.</p>
-      <p class="small muted">Antes se guarda una copia automática en backups. Luego entre como admin y cree meseros, cocina y cajero en Personal.</p>
-      <button class="btn danger" data-act="install-reset">Dejar listo para instalar</button>
+    <div class="card" style="margin-top:14px">
+      <div class="ticket-head">Instalar en tablet / celular</div>
+      <p class="hint">En Chrome o Edge: menú → <b>Instalar aplicación</b> o <b>Agregar a la pantalla de inicio</b>. Así cocina y caja se abren a pantalla completa sin barra del navegador.</p>
+      <p class="small muted">La app necesita el PC servidor encendido; sin red local no cobra ni toma pedidos.</p>
     </div>
+    ${salonResetCard({ open_orders: (state.tables || []).filter((t) => t.order).length, occupied_tables: (state.tables || []).filter((t) => t.order || t.status === 'occupied' || t.status === 'waiting_payment').length })}
     <div class="card" style="margin-top:14px">
       <div class="between"><div class="ticket-head" style="margin:0">Mesas</div>
         <button class="btn" data-act="new-table">Agregar mesa</button></div>
@@ -1106,6 +1642,7 @@ function bind() {
   root.onclick = onClick;
   root.onsubmit = onSubmit;
   root.onchange = onChange;
+  root.oninput = onInput;
   modalRoot.onsubmit = onSubmit;
 }
 
@@ -1116,14 +1653,100 @@ async function onClick(e) {
   try {
     if (act === 'nav') { closeModal(); state.moreNav = false; go(el.dataset.view); }
     if (act === 'toggle-more') { state.moreNav = !state.moreNav; render(); return; }
+    if (act === 'kds-station') { state.station = el.dataset.st; await loadView(true); return; }
+    if (act === 'tables-view') {
+      state.tablesView = el.dataset.mode === 'list' ? 'list' : 'floor';
+      localStorage.setItem('jr.tablesView', state.tablesView);
+      state.floorEdit = false;
+      render();
+      return;
+    }
+    if (act === 'toggle-kitchen-sound') {
+      state.kitchenSound = !state.kitchenSound;
+      localStorage.setItem('jr.kitchenSound', state.kitchenSound ? '1' : '0');
+      toast(state.kitchenSound ? 'Sonido de cocina activado' : 'Sonido de cocina apagado');
+      render();
+      return;
+    }
+    if (act === 'toggle-kitchen-dark') {
+      state.kitchenDark = !state.kitchenDark;
+      localStorage.setItem('jr.kitchenDark', state.kitchenDark ? '1' : '0');
+      toast(state.kitchenDark ? 'Cocina en modo oscuro' : 'Cocina en modo claro');
+      render();
+      return;
+    }
+    if (act === 'kitchen-fullscreen') {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.documentElement.requestFullscreen();
+      } catch {
+        toast('No se pudo cambiar a pantalla completa', true);
+      }
+      render();
+      return;
+    }
+    if (act === 'date-preset') {
+      const p = el.dataset.preset;
+      if (p === 'today') { state.from = today(); state.to = today(); }
+      else if (p === 'yesterday') { state.from = daysAgo(1); state.to = daysAgo(1); }
+      else if (p === 'week') { state.from = daysAgo(7); state.to = today(); }
+      else if (p === 'month') { state.from = daysAgo(30); state.to = today(); }
+      await loadReports();
+      render();
+      return;
+    }
+    if (act === 'export-csv') {
+      exportCurrentReport();
+      return;
+    }
+    if (act === 'restore-backup') {
+      const file = el.dataset.file;
+      if (!await confirmDialog(
+        `Se restaurará la copia:\n${file}\n\nAntes se guarda una copia de seguridad.\nLuego debe cerrar la ventana del servidor y abrir iniciar.bat otra vez.`,
+        { title: 'Restaurar copia', danger: true, confirmText: 'Continuar' }
+      )) return;
+      const typed = await promptDialog('Escriba RESTAURAR para confirmar:', { title: 'Confirmación', required: true });
+      if (typed == null) return;
+      if (String(typed).trim().toUpperCase() !== 'RESTAURAR') {
+        toast('No se restauró. Debía escribir RESTAURAR.', true);
+        return;
+      }
+      const r = await api('/api/backups/restore', { method: 'POST', body: { filename: file, confirm: 'RESTAURAR' } });
+      toast(r.message || 'Reinicie el servidor para aplicar');
+      return;
+    }
     if (act === 'toggle-ticket') {
       state.ticketOpen = !state.ticketOpen;
       render();
       return;
     }
     if (act === 'logout') { await api('/api/logout', { method: 'POST' }); state.user = null; state.moreNav = false; go('login'); }
-    if (act === 'cat') { state.categoryId = el.dataset.id; render(); return; }
-    if (act === 'cat-home') { state.categoryId = null; render(); return; }
+    if (act === 'cat') { state.categoryId = el.dataset.id; state.posSearch = ''; render(); return; }
+    if (act === 'cat-home') { state.categoryId = null; state.posSearch = ''; render(); return; }
+    if (act === 'pos-clear-search') { state.posSearch = ''; render(); return; }
+    if (act === 'bill-tab') { state.billingTab = el.dataset.tab; await loadView(true); return; }
+    if (act === 'bill-history') { state.billingTab = 'history'; go('facturar'); return; }
+    if (act === 'split-tables') { await splitTableMenu(); return; }
+    if (act === 'split-table') {
+      await api(`/api/tables/${el.dataset.id}/split`, { method: 'POST' });
+      closeModal();
+      toast('Mesa separada');
+      await loadView();
+      return;
+    }
+    if (act === 'reprint-inv') {
+      const r = await api(`/api/invoices/${el.dataset.id}/print`, { method: 'POST' });
+      openTicket(r.print);
+      return;
+    }
+    if (act === 'void-inv') {
+      const reason = await promptDialog('¿Por qué se anula este ticket?', { title: 'Anular venta', placeholder: 'Ej. error en el cobro' });
+      if (reason == null) return;
+      const r = await api(`/api/invoices/${el.dataset.id}/cancel`, { method: 'POST', body: { reason } });
+      toast(r.message || 'Ticket anulado');
+      await loadView();
+      return;
+    }
     if (act === 'table') await onTable(Number(el.dataset.id));
     if (act === 'add-prod') await addProduct(Number(el.dataset.id));
     if (act === 'qty') await changeQty(Number(el.dataset.id), Number(el.dataset.d));
@@ -1133,7 +1756,6 @@ async function onClick(e) {
     if (act === 'wait-pay') await waitPay();
     if (act === 'cancel-order') await cancelOrder();
     if (act === 'reset-salon') await resetSalon();
-    if (act === 'install-reset') await installReset();
     if (act === 'del-ing') await deleteIngredient(Number(el.dataset.id));
     if (act === 'toggle-floor-edit') {
       state.floorEdit = !state.floorEdit;
@@ -1161,7 +1783,7 @@ async function onClick(e) {
     if (act === 'new-cat') catForm();
     if (act === 'edit-cat') catForm(state.categories.find((c) => c.id === Number(el.dataset.id)));
     if (act === 'del-cat') {
-      if (!confirm('¿Borrar este grupo? Los productos quedan sin grupo.')) return;
+      if (!await confirmDialog('¿Borrar este grupo? Los productos quedan sin grupo.', { title: 'Borrar grupo', danger: true })) return;
       const r = await api('/api/categories/' + el.dataset.id, { method: 'DELETE' });
       toast(r.message || 'Grupo borrado');
       await loadView();
@@ -1172,10 +1794,11 @@ async function onClick(e) {
     if (act === 'new-table') tableForm();
     if (act === 'edit-table') tableForm(state.tables.find((t) => t.id === Number(el.dataset.id)));
     if (act === 'del-table') {
-      if (!confirm('¿Quitar esta mesa?')) return;
+      if (!await confirmDialog('¿Quitar esta mesa?', { title: 'Quitar mesa', danger: true })) return;
       await api('/api/tables/' + el.dataset.id, { method: 'DELETE' });
       await loadView();
     }
+    if (act === 'change-pass-self') { showChangePasswordModal(false); return; }
     if (act === 'backup') { await api('/api/backup', { method: 'POST' }); toast('Copia guardada'); await loadView(); }
     if (act === 'print-test') {
       const r = await api('/api/print/test', { method: 'POST' });
@@ -1204,52 +1827,108 @@ async function onSubmit(e) {
       if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
       const r = await api('/api/login', { method: 'POST', body: obj });
       state.user = r.user;
+      state.license = r.license || state.license;
       const me = await api('/api/me');
       state.settings = me.settings;
       state.alerts = me.alerts || [];
+      state.license = me.license || state.license;
+      state.setup = me.setup || null;
       try { connectSocket(); } catch { /* el acceso no depende del socket */ }
       go(homeFor(r.user.role));
+      await loadView();
+      if (r.user.must_change_password || r.must_change_password) showChangePasswordModal(true);
+      return;
+    }
+    if (act === 'change-password') {
+      if (String(obj.password) !== String(obj.password2)) {
+        toast('Las contraseñas nuevas no coinciden', true);
+        return;
+      }
+      const r = await api('/api/password', {
+        method: 'POST',
+        body: { current: obj.current, password: obj.password }
+      });
+      state.user = r.user;
+      closeModal();
+      // restaurar click del modal
+      modalRoot.onclick = (e) => {
+        if (e.target === modalRoot || e.target.closest('[data-act="close-modal"]')) {
+          closeModal();
+          return;
+        }
+        const actEl = e.target.closest('[data-act]');
+        if (actEl && actEl.closest('#app') == null && actEl.tagName !== 'FORM') onClick(e);
+      };
+      toast(r.message || 'Contraseña actualizada');
       await loadView();
       return;
     }
     if (act === 'invoice') {
-      const total = Number(form.dataset.total);
-      const payments = ['efectivo', 'nequi', 'daviplata']
-        .map((m) => ({ method: m, amount: Number(obj[m] || 0) }))
-        .filter((p) => p.amount > 0);
-      const sum = payments.reduce((s, p) => s + p.amount, 0);
-      if (Math.round(sum) < Math.round(total)) { toast('El pago no cubre el total', true); return; }
-      const r = await api('/api/invoices', { method: 'POST', body: { order_id: Number(form.dataset.oid), payments } });
-      toast('Cuenta #' + r.invoice.number + ' cobrada');
-      if (r.change > 0) toast('Vuelto: ' + money(r.change));
-      if (r.alerts?.length) toast('Se está acabando: ' + r.alerts.map((a) => a.name).join(', '));
-      openTicket(r.print);
-      go('facturar');
+      await withBusy('invoice', async () => {
+        const total = Number(form.dataset.total);
+        const discount = Math.max(0, Math.round(Number(obj.discount) || 0));
+        const tip = Math.max(0, Math.round(Number(obj.tip) || 0));
+        const payments = ['efectivo', 'nequi', 'daviplata']
+          .map((m) => ({ method: m, amount: Number(obj[m] || 0) }))
+          .filter((p) => p.amount > 0);
+        const sum = payments.reduce((s, p) => s + p.amount, 0);
+        if (Math.round(sum) < Math.round(total)) { toast('El pago no cubre el total', true); return; }
+        render();
+        const r = await api('/api/invoices', {
+          method: 'POST',
+          body: { order_id: Number(form.dataset.oid), payments, discount, tip }
+        });
+        state.billDiscount = 0;
+        state.billTip = 0;
+        toast('Cuenta #' + r.invoice.number + ' cobrada');
+        if (r.change > 0) toast('Vuelto: ' + money(r.change));
+        if (r.alerts?.length) toast('Se está acabando: ' + r.alerts.map((a) => a.name).join(', '));
+        openTicket(r.print);
+        go('facturar');
+      });
       return;
     }
     if (act === 'open-cash') {
-      const r = await api('/api/cash/open', { method: 'POST', body: { opening_amount: Number(obj.opening_amount) } });
-      toast('Caja abierta');
-      openTicket(r.print);
+      await withBusy('cash-open', async () => {
+        render();
+        const r = await api('/api/cash/open', { method: 'POST', body: { opening_amount: Number(obj.opening_amount) } });
+        toast('Caja abierta');
+        openTicket(r.print);
+        await loadView();
+      });
+      return;
     }
     if (act === 'expense') {
-      const r = await api('/api/cash/expense', { method: 'POST', body: { amount: Number(obj.amount), description: obj.description } });
-      toast('Gasto anotado');
-      openTicket(r.print);
+      await withBusy('expense', async () => {
+        render();
+        const r = await api('/api/cash/expense', { method: 'POST', body: { amount: Number(obj.amount), description: obj.description } });
+        toast('Gasto anotado');
+        openTicket(r.print);
+        await loadView();
+      });
+      return;
     }
     if (act === 'close-cash') {
-      const body = { counted_cash: Number(obj.counted_cash), notes: obj.notes };
-      let r;
-      try {
-        r = await api('/api/cash/close', { method: 'POST', body });
-      } catch (err) {
-        if (err.status === 409) {
-          if (!confirm((err.message || 'Hay cuentas abiertas') + '\n\n¿Cerrar la caja igual? Las mesas no se reinician.')) return;
-          r = await api('/api/cash/close', { method: 'POST', body: { ...body, force: true } });
-        } else throw err;
-      }
-      toast('Caja cerrada. ' + cashDiffLabel(r.register.difference));
-      openTicket(r.print);
+      await withBusy('cash-close', async () => {
+        const body = { counted_cash: Number(obj.counted_cash), notes: obj.notes };
+        render();
+        let r;
+        try {
+          r = await api('/api/cash/close', { method: 'POST', body });
+        } catch (err) {
+          if (err.status === 409) {
+            if (!await confirmDialog(
+              (err.message || 'Hay cuentas abiertas') + '\n\n¿Cerrar la caja igual? Las mesas no se reinician.',
+              { title: 'Cerrar caja', danger: true, confirmText: 'Cerrar igual' }
+            )) return;
+            r = await api('/api/cash/close', { method: 'POST', body: { ...body, force: true } });
+          } else throw err;
+        }
+        toast('Caja cerrada. ' + cashDiffLabel(r.register.difference));
+        openTicket(r.print);
+        await loadView();
+      });
+      return;
     }
     if (act === 'save-settings') {
       obj.tax_included = obj.tax_included === '1';
@@ -1290,6 +1969,7 @@ async function onSubmit(e) {
     await loadView();
   } catch (err) {
     toast(err.message, true);
+    if (err.data?.shortages) toast('Falta: ' + err.data.shortages.map((s) => s.name).join(', '), true);
     if (act === 'login') {
       const errEl = form.querySelector('#login-error');
       if (errEl) {
@@ -1300,9 +1980,55 @@ async function onSubmit(e) {
   }
 }
 
+async function onInput(e) {
+  if (e.target.id === 'pos-search') {
+    state.posSearch = e.target.value;
+    if (state.view === 'comanda') render();
+  }
+}
+
 async function onChange(e) {
   if (e.target.dataset.act === 'from') { state.from = e.target.value; await loadReports(); render(); }
   if (e.target.dataset.act === 'to') { state.to = e.target.value; await loadReports(); render(); }
+  if (e.target.dataset.act === 'bill-adj') {
+    const field = e.target.dataset.field;
+    const val = Math.max(0, Math.round(Number(e.target.value) || 0));
+    if (field === 'discount') state.billDiscount = val;
+    if (field === 'tip') state.billTip = val;
+    if (state.view === 'facturar' && state.order) render();
+  }
+}
+
+function exportCurrentReport() {
+  const r = state.reports || {};
+  const stamp = `${state.from}_${state.to}`;
+  if (state.reportTab === 'sales') {
+    exportCsv(`ventas_${stamp}.csv`, ['Día', 'Cuentas', 'Total'],
+      (r.daily || []).map((d) => [d.day, d.tickets, Math.round(d.total || 0)]));
+  } else if (state.reportTab === 'products') {
+    exportCsv(`productos_${stamp}.csv`, ['Producto', 'Cantidad', 'Total'],
+      (r.products || []).map((p) => [p.product_name || p.name, p.qty, Math.round(p.total || 0)]));
+  } else if (state.reportTab === 'ingredients') {
+    exportCsv(`ingredientes_${stamp}.csv`, ['Ingrediente', 'Consumido', 'Unidad'],
+      (r.ingredients || []).map((i) => [i.name, i.consumed, i.unit]));
+  } else if (state.reportTab === 'waiters') {
+    exportCsv(`meseros_${stamp}.csv`, ['Mesero', 'Cuentas', 'Total'],
+      (r.waiters || []).map((w) => [w.name, w.tickets, Math.round(w.total || 0)]));
+  } else if (state.reportTab === 'audit') {
+    exportCsv(`auditoria_${stamp}.csv`, ['Fecha', 'Usuario', 'Acción', 'Producto', 'Cantidad', 'Mesa', 'Pedido', 'Detalle'],
+      (r.audit || []).map((a) => {
+        let detail = '';
+        try {
+          const d = typeof a.details === 'string' ? JSON.parse(a.details || '{}') : (a.details || {});
+          detail = d.reason || d.notes || '';
+        } catch { detail = String(a.details || ''); }
+        return [a.created_at, a.user_name, auditActionLabel(a.action), a.product_name, a.quantity, a.table_name, a.order_id, detail];
+      }));
+  } else {
+    toast('No hay datos para exportar', true);
+    return;
+  }
+  toast('CSV descargado');
 }
 
 async function onTable(id) {
@@ -1322,8 +2048,28 @@ async function onTable(id) {
     if (order) go('facturar', order.id);
     return;
   }
+  if (t.joined_to_id) {
+    const choice = await joinedTableActions(t);
+    if (choice === 'split') {
+      await api(`/api/tables/${id}/split`, { method: 'POST' });
+      toast('Mesa separada');
+      await loadView();
+      return;
+    }
+    if (choice === 'order') {
+      const primary = state.tables.find((x) => x.id === t.joined_to_id);
+      const order = primary?.order;
+      if (order) go('comanda', order.id);
+      else {
+        const r = await api('/api/orders', { method: 'POST', body: { table_id: t.joined_to_id } });
+        go('comanda', r.order.id);
+      }
+      return;
+    }
+    return;
+  }
   if (t.status === 'reserved') {
-    if (confirm('¿Quitar la reserva y tomar el pedido?')) {
+    if (await confirmDialog('¿Quitar la reserva y tomar el pedido?', { title: t.name, confirmText: 'Tomar pedido' })) {
       await api(`/api/tables/${id}/reserve`, { method: 'POST' });
     } else return;
   }
@@ -1335,6 +2081,33 @@ async function onTable(id) {
   const targetId = t.joined_to_id || t.id;
   const r = await api('/api/orders', { method: 'POST', body: { table_id: targetId } });
   go('comanda', r.order.id);
+}
+
+function joinedTableActions(t) {
+  return new Promise((resolve) => {
+    modal(`
+      <h3 style="margin-top:0">${esc(t.name)}</h3>
+      <p class="hint">Está junta con ${esc(t.joined_to_name || 'otra mesa')}.</p>
+      <button class="btn primary block lg" id="m-order">Ver pedido</button>
+      <button class="btn ghost block" id="m-split" style="margin-top:8px">Separar mesa</button>
+      <button class="btn ghost block" id="m-x" style="margin-top:8px">Cancelar</button>`);
+    modalRoot.querySelector('#m-order').onclick = () => { closeModal(); resolve('order'); };
+    modalRoot.querySelector('#m-split').onclick = () => { closeModal(); resolve('split'); };
+    modalRoot.querySelector('#m-x').onclick = () => { closeModal(); resolve(null); };
+  });
+}
+
+async function splitTableMenu() {
+  const joined = (state.tables || []).filter((t) => t.joined_to_id === state.order?.table_id);
+  if (!joined.length) { toast('No hay mesas juntas', true); return; }
+  modal(`
+    <h3 style="margin-top:0">Separar mesas</h3>
+    <p class="hint">La mesa queda libre. El pedido sigue en ${esc(state.order?.table_name || 'la mesa principal')}.</p>
+    ${joined.map((t) => `
+      <button type="button" class="btn ghost block" data-act="split-table" data-id="${t.id}" style="margin-top:8px">
+        Separar ${esc(t.name)}
+      </button>`).join('')}
+    <button type="button" class="btn ghost block" data-act="close-modal" style="margin-top:8px">Cancelar</button>`);
 }
 
 function tableActions(t) {
@@ -1459,7 +2232,8 @@ async function noteItem(itemId) {
 }
 
 async function cancelItem(itemId) {
-  const reason = prompt('¿Por qué lo quita? (si quiere, puede dejarlo vacío)') ?? '';
+  const reason = await promptDialog('¿Por qué lo quita?', { title: 'Quitar producto', placeholder: 'Opcional' });
+  if (reason == null) return;
   const r = await api(`/api/orders/${state.order.id}/items/${itemId}/cancel`, { method: 'POST', body: { reason } });
   if (r.order?.status === 'cancelled') {
     toast('La mesa quedó libre');
@@ -1471,57 +2245,40 @@ async function cancelItem(itemId) {
 
 async function cancelOrder() {
   const empty = !(state.order?.items || []).some((i) => i.status !== 'cancelled');
-  const ok = confirm(empty
-    ? '¿Liberar esta mesa? No hay productos en la cuenta.'
-    : '¿Cancelar esta cuenta y dejar la mesa libre? No se cobra nada.');
+  const ok = await confirmDialog(
+    empty
+      ? '¿Liberar esta mesa? No hay productos en la cuenta.'
+      : '¿Cancelar esta cuenta y dejar la mesa libre? No se cobra nada.',
+    { title: empty ? 'Liberar mesa' : 'Cancelar cuenta', danger: true }
+  );
   if (!ok) return;
-  const reason = empty ? 'Mesa liberada' : (prompt('¿Por qué se cancela? (si quiere, puede dejarlo vacío)') ?? '');
+  const reason = empty ? 'Mesa liberada' : await promptDialog('¿Por qué se cancela?', { title: 'Motivo', placeholder: 'Opcional' });
+  if (reason == null) return;
   const r = await api(`/api/orders/${state.order.id}/cancel`, { method: 'POST', body: { reason } });
   toast(r.message || 'Cuenta cancelada');
   go('mesas');
 }
 
 async function resetSalon() {
-  if (!confirm('Esto cancela las cuentas que no se han cobrado y deja las mesas libres.\nLas ventas ya cobradas no se tocan.\n¿Seguir?')) return;
+  if (!await confirmDialog(
+    'Esto cancela las cuentas que no se han cobrado y deja las mesas libres.\nLas ventas ya cobradas no se tocan.',
+    { title: 'Reiniciar salón', danger: true, confirmText: 'Reiniciar' }
+  )) return;
   const r = await api('/api/salon/reset', { method: 'POST', body: { reason: 'Reinicio de salón' } });
   toast(r.message || 'Salón reiniciado');
   await loadView();
 }
 
-async function installReset() {
-  if (!confirm(
-    'Esto deja el sistema como recién instalado en el restaurante.\n\n' +
-    'SE BORRA: ventas, facturas, caja, movimientos de inventario y usuarios que no sean admin.\n' +
-    'SE CONSERVA: menú (grupos, productos, ingredientes, recetas) y mesas.\n' +
-    'El stock queda en 0.\n\n' +
-    '¿Seguir?'
-  )) return;
-  const typed = prompt('Escriba INSTALAR para confirmar (en mayúsculas):');
-  if (typed == null) return;
-  if (String(typed).trim().toUpperCase() !== 'INSTALAR') {
-    toast('No se hizo el reinicio. Debía escribir INSTALAR.', true);
-    return;
-  }
-  try {
-    const r = await api('/api/install/reset', {
-      method: 'POST',
-      body: { confirm: 'INSTALAR', reset_stock: true }
-    });
-    toast(r.message || 'Sistema listo para instalar');
-    if (r.backup) toast('Copia guardada: ' + r.backup);
-    await loadView();
-  } catch (e) {
-    toast(e.message || 'No se pudo reiniciar', true);
-  }
-}
-
 async function sendOrder() {
-  const r = await api(`/api/orders/${state.order.id}/send`, { method: 'POST' });
-  state.order = r.order;
-  toast('Enviado a cocina');
-  if (r.print) openTicket(r.print);
-  if (r.shortages?.length) toast('Ojo, queda poco: ' + r.shortages.map((s) => s.name).join(', '), true);
-  render();
+  await withBusy('send', async () => {
+    render();
+    const r = await api(`/api/orders/${state.order.id}/send`, { method: 'POST' });
+    state.order = r.order;
+    toast('Enviado a cocina');
+    if (r.print) openTicket(r.print);
+    if (r.shortages?.length) toast('Ojo, queda poco: ' + r.shortages.map((s) => s.name).join(', '), true);
+    render();
+  });
 }
 
 async function waitPay() {
@@ -1558,14 +2315,18 @@ function ingForm(i) {
 
 function moveForm(id, type) {
   const i = state.ingredients.find((x) => x.id === id);
+  const titles = { purchase: 'Reponer', adjustment: 'Corregir cantidad', waste: 'Se botó / merma' };
+  const qtyLabel = type === 'adjustment'
+    ? 'Cantidad (ponga negativo si hay que bajar)'
+    : (type === 'waste' ? 'Cuánto se botó' : 'Cuánto entra');
   modal(`
-    <h3 style="margin-top:0">${type === 'purchase' ? 'Reponer' : 'Corregir cantidad'} · ${esc(i.name)}</h3>
+    <h3 style="margin-top:0">${titles[type] || 'Movimiento'} · ${esc(i.name)}</h3>
     <form data-act="save-move">
       <input type="hidden" name="id" value="${id}" />
       <input type="hidden" name="type" value="${type}" />
-      <div class="field"><label>${type === 'adjustment' ? 'Cantidad (ponga negativo si hay que bajar)' : 'Cuánto entra'}</label>
-        <input name="quantity" type="number" step="0.01" required /></div>
-      <div class="field"><label>Nota (si quiere)</label><input name="reason" /></div>
+      <div class="field"><label>${qtyLabel}</label>
+        <input name="quantity" type="number" step="0.01" min="${type === 'waste' ? '0.01' : ''}" required /></div>
+      <div class="field"><label>Nota (si quiere)</label><input name="reason" placeholder="${type === 'waste' ? 'Ej. se dañó, venció…' : ''}" /></div>
       <button class="btn primary block">Registrar</button>
     </form>`);
 }
@@ -1765,7 +2526,7 @@ async function saveProd(form) {
       removable: fd.get('rem_' + idx) ? 1 : 0
     });
   }
-  if (!recipe.length && !confirm('Este producto va a quedar sin ingredientes. ¿Guardar así?')) return;
+  if (!recipe.length && !await confirmDialog('Este producto va a quedar sin ingredientes. ¿Guardar así?', { title: 'Sin receta' })) return;
   const label = String(fd.get('choice_label') || '').trim();
   const options = String(fd.get('choice_options') || '').split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
   const choices = options.length ? [{ id: 'opcion', label: label || 'Elija', required: true, options }] : [];
@@ -1780,7 +2541,7 @@ async function saveProd(form) {
 }
 
 async function deleteProduct(id) {
-  if (!confirm('¿Borrar este producto? Si ya se vendió, se oculta del menú para no perder las cuentas.')) return;
+  if (!await confirmDialog('¿Borrar este producto? Si ya se vendió, se oculta del menú para no perder las cuentas.', { title: 'Borrar producto', danger: true })) return;
   const r = await api('/api/products/' + id, { method: 'DELETE' });
   toast(r.message || (r.hidden ? 'Producto oculto' : 'Producto borrado'));
   closeModal();
@@ -1789,7 +2550,10 @@ async function deleteProduct(id) {
 
 async function deleteIngredient(id) {
   const ing = state.ingredients.find((x) => x.id === id);
-  if (!confirm(`¿Borrar el ingrediente${ing ? ` “${ing.name}”` : ''}?\nSi está en alguna receta, primero hay que quitarlo del producto.`)) return;
+  if (!await confirmDialog(
+    `¿Borrar el ingrediente${ing ? ` “${ing.name}”` : ''}?\nSi está en alguna receta, primero hay que quitarlo del producto.`,
+    { title: 'Borrar ingrediente', danger: true }
+  )) return;
   try {
     const r = await api('/api/ingredients/' + id, { method: 'DELETE' });
     toast(r.message || 'Ingrediente borrado');

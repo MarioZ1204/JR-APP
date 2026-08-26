@@ -1,11 +1,14 @@
 {
   "name": "jr-restaurante",
-  "version": "1.0.0",
-  "description": "Sistema de gestión para restaurante — local, red LAN, sin servidor externo",
+  "version": "1.1.0",
+  "description": "Sistema de gestión para restaurante — local, red LAN, alquiler a locales",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "backup": "node -e \"require('./server/backup').manualBackup()\""
+    "backup": "node -e \"require('./server/backup').manualBackup()\"",
+    "license": "node scripts/license-key.js",
+    "apply-license": "node scripts/apply-license.js",
+    "factory-reset": "node scripts/factory-reset.js"
   },
   "engines": {
     "node": ">=22"
