@@ -4,8 +4,8 @@ const bcrypt = require('bcryptjs');
 const { seedCatalog } = require('./catalog');
 const { DatabaseSync } = require('node:sqlite');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const DB_PATH = path.join(DATA_DIR, 'restaurante.db');
+const DATA_DIR = process.env.JR_DATA_DIR || path.join(__dirname, '..', 'data');
+const DB_PATH = path.join(DATA_DIR, process.env.JR_DB_FILE || 'restaurante.db');
 
 let db;
 
@@ -105,6 +105,8 @@ function createSchema() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       unit TEXT NOT NULL,
+      unit_kind TEXT NOT NULL DEFAULT 'count',
+      portion_note TEXT NOT NULL DEFAULT '',
       stock REAL NOT NULL DEFAULT 0,
       min_stock REAL NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
@@ -282,6 +284,22 @@ function migrateSchema() {
   if (!userCols.includes('must_change_password')) {
     getDb().exec('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0');
   }
+  const ingCols = tableCols('ingredients');
+  if (!ingCols.includes('unit_kind')) {
+    getDb().exec("ALTER TABLE ingredients ADD COLUMN unit_kind TEXT NOT NULL DEFAULT 'count'");
+  }
+  if (!ingCols.includes('portion_note')) {
+    getDb().exec("ALTER TABLE ingredients ADD COLUMN portion_note TEXT NOT NULL DEFAULT ''");
+  }
+  if (ingCols.includes('unit') && !getDb().prepare("SELECT value FROM settings WHERE key = 'unit_kind_migrated'").get()) {
+    const { inferUnitKind } = require('./unit-kinds');
+    const rows = getDb().prepare('SELECT id, unit FROM ingredients').all();
+    const upd = getDb().prepare('UPDATE ingredients SET unit_kind = ? WHERE id = ?');
+    for (const row of rows) {
+      upd.run(inferUnitKind(row.unit), row.id);
+    }
+    getDb().prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('unit_kind_migrated', '1')").run();
+  }
   const missingPos = getDb().prepare('SELECT id FROM restaurant_tables WHERE pos_x IS NULL OR pos_y IS NULL ORDER BY sort_order, id').all();
   if (missingPos.length) {
     const cols = 4;
@@ -302,7 +320,9 @@ function markCoreRecipeLines() {
     UPDATE recipes SET removable = 0
     WHERE ingredient_id IN (
       SELECT id FROM ingredients WHERE name IN (
-        'Pan de hamburguesa', 'Carne molida', 'Papa', 'Aceite', 'Mezcla brownie'
+        'Pan hamburguesa', 'Pan de hamburguesa', 'Pan perro',
+        'Carne de hamburguesa', 'Carne molida',
+        'Papa a la francesa', 'Papa', 'Mezcla brownie', 'Aceite'
       )
     )
   `).run();
@@ -311,7 +331,7 @@ function markCoreRecipeLines() {
 
 const DEFAULT_SETTINGS = {
   business_name: 'Mi Restaurante',
-  business_tagline: 'Sistema de gestión',
+  business_tagline: '',
   business_nit: '',
   business_address: '',
   business_phone: '',
@@ -352,6 +372,7 @@ function seedIfEmpty() {
   insertUser.run('Mesero', 'mesero', hash('mesero123'), 'waiter');
   insertUser.run('Cocina', 'cocina', hash('cocina123'), 'kitchen');
   insertUser.run('Cajero', 'cajero', hash('cajero123'), 'cashier');
+  const adminId = db.prepare("SELECT id FROM users WHERE username = 'admin'").get().id;
 
   const insertTable = db.prepare(
     'INSERT INTO restaurant_tables (name, seats, sort_order, pos_x, pos_y) VALUES (?, ?, ?, ?, ?)'
@@ -378,16 +399,16 @@ function seedIfEmpty() {
   insertProd.run(catPostres, 'Brownie', 7000, 'kitchen');
 
   const insertIng = db.prepare(
-    'INSERT INTO ingredients (name, unit, stock, min_stock) VALUES (?, ?, ?, ?)'
+    'INSERT INTO ingredients (name, unit, unit_kind, stock, min_stock) VALUES (?, ?, ?, ?, ?)'
   );
-  const pan = insertIng.run('Pan de hamburguesa', 'unidad', 40, 10).lastInsertRowid;
-  const carne = insertIng.run('Carne molida', 'g', 5000, 800).lastInsertRowid;
-  const lechuga = insertIng.run('Lechuga', 'hoja', 80, 20).lastInsertRowid;
-  const tomate = insertIng.run('Tomate', 'rodaja', 60, 15).lastInsertRowid;
-  const queso = insertIng.run('Queso', 'porción', 40, 10).lastInsertRowid;
-  const papa = insertIng.run('Papa', 'g', 8000, 1500).lastInsertRowid;
-  const aceite = insertIng.run('Aceite', 'ml', 2000, 400).lastInsertRowid;
-  const chocolate = insertIng.run('Mezcla brownie', 'porción', 20, 5).lastInsertRowid;
+  const pan = insertIng.run('Pan de hamburguesa', 'unidad', 'count', 40, 10).lastInsertRowid;
+  const carne = insertIng.run('Carne molida', 'g', 'weight', 5000, 800).lastInsertRowid;
+  const lechuga = insertIng.run('Lechuga', 'hoja', 'count', 80, 20).lastInsertRowid;
+  const tomate = insertIng.run('Tomate', 'rodaja', 'count', 60, 15).lastInsertRowid;
+  const queso = insertIng.run('Queso', 'loncha', 'count', 40, 10).lastInsertRowid;
+  const papa = insertIng.run('Papa', 'g', 'weight', 8000, 1500).lastInsertRowid;
+  const aceite = insertIng.run('Aceite', 'ml', 'volume', 2000, 400).lastInsertRowid;
+  const chocolate = insertIng.run('Mezcla brownie', 'porción', 'portion', 20, 5).lastInsertRowid;
 
   const insertRecipe = db.prepare(
     'INSERT INTO recipes (product_id, ingredient_id, quantity, removable) VALUES (?, ?, ?, ?)'

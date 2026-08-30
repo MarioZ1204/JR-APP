@@ -1,5 +1,6 @@
-import { api, money, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews } from './api.js';
-import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=48';
+import { api, money, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews, UNIT_KIND_LABELS, UNITS_BY_KIND, inferUnitKind, unitKindLabel } from './api.js';
+import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=56';
+import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=56';
 
 const root = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
@@ -34,7 +35,7 @@ const state = {
   socket: null,
   live: false,
   infoName: 'Mi Restaurante',
-  infoTagline: 'Sistema de gestión',
+  infoTagline: '',
   lanUrls: [],
   moreNav: false,
   ticketOpen: false,
@@ -50,7 +51,10 @@ const state = {
   billTip: 0,
   license: null,
   setup: null,
-  dashboard: null
+  dashboard: null,
+  navCounts: {},
+  tablesFilter: 'all',
+  cartBump: false
 };
 
 function toast(msg, err = false) {
@@ -112,7 +116,7 @@ async function withBusy(key, fn) {
 }
 
 function pageLoading() {
-  return `<div class="page-loading" aria-live="polite"><div class="spinner"></div><p>Cargando…</p></div>`;
+  return `<div class="page-loading" aria-live="polite"><div class="spinner-wrap"><div class="spinner"></div></div><p>Cargando…</p></div>`;
 }
 
 function deniedView() {
@@ -196,7 +200,7 @@ async function boot() {
   try {
     const info = await api('/api/info');
     state.infoName = info.business_name;
-    state.infoTagline = info.business_tagline || 'Sistema de gestión';
+    state.infoTagline = info.business_tagline || '';
     state.lanUrls = info.lan_urls || [];
     state.license = info.license || null;
   } catch { /* login aún funciona */ }
@@ -246,10 +250,12 @@ function connectSocket() {
   };
   state.socket.on('tables:changed', refresh);
   state.socket.on('orders:changed', refresh);
-  state.socket.on('kitchen:changed', () => {
+  state.socket.on('kitchen:changed', async () => {
     if (state.kitchenSound) playKitchenChime();
+    await fetchNavCounts();
     if (state.view === 'cocina') loadView(true);
-    else if (state.user?.role === 'kitchen') toast('Llegó un pedido nuevo');
+    else render();
+    if (state.user?.role === 'kitchen') toast('Llegó un pedido nuevo');
   });
   state.socket.on('cash:changed', refresh);
   state.socket.on('inventory:changed', refresh);
@@ -281,6 +287,7 @@ async function loadView(silent = false) {
   }
   try {
     if (view === 'login') { state.loading = false; render(); return; }
+    const navP = fetchNavCounts();
     if (view === 'panel') {
       state.dashboard = await api('/api/dashboard');
       const me = await api('/api/me');
@@ -357,6 +364,7 @@ async function loadView(silent = false) {
       state.tables = t.tables;
       state.lanUrls = info.lan_urls || [];
     }
+    await navP;
   } catch (e) {
     if (e.status === 401) { state.user = null; state.loading = false; go('login'); return; }
     if (e.status === 403) {
@@ -449,11 +457,32 @@ function ico(name) {
 }
 
 const MOBILE_PRIMARY = new Set(['panel', 'mesas', 'cocina', 'facturar', 'caja']);
+const OP_VIEWS = new Set(['mesas', 'comanda', 'cocina', 'facturar']);
+const ADMIN_VIEWS = new Set(['inventario', 'productos', 'usuarios', 'reportes', 'config']);
+
+async function fetchNavCounts() {
+  if (!state.user) return;
+  try {
+    state.navCounts = await api('/api/nav-counts');
+  } catch { /* opcional */ }
+}
+
+function navBadgeCount(viewId) {
+  const c = state.navCounts || {};
+  if (viewId === 'cocina') return Number(c.kitchen_pending) || 0;
+  if (viewId === 'facturar') return Number(c.waiting_payment) || 0;
+  if (viewId === 'mesas') return Number(c.open_orders) || 0;
+  return 0;
+}
 
 function navBtn(i) {
+  const n = navBadgeCount(i.id);
+  const badge = n > 0
+    ? `<span class="nav-badge${n > 9 ? ' wide' : ''}" aria-label="${n} pendientes">${n > 99 ? '99+' : n}</span>`
+    : '';
   return `
     <button type="button" class="${state.view === i.id ? 'on' : ''}" data-act="nav" data-view="${i.id}">
-      ${ico(i.ico)}<span>${i.label}</span>
+      <span class="nav-ico-wrap">${ico(i.ico)}${badge}</span><span>${i.label}</span>
     </button>`;
 }
 
@@ -479,7 +508,7 @@ function render() {
     return;
   }
   const brand = esc(state.settings.business_name || state.infoName || 'Sistema');
-  const tagline = esc(state.settings.business_tagline || state.infoTagline || '');
+  const tagline = esc(brandTagline(state.settings.business_tagline || state.infoTagline));
   const all = navFor(state.user.role);
   const sideLinks = all.map(navBtn).join('');
   const useMore = all.length > 5;
@@ -497,14 +526,14 @@ function render() {
       <div class="more-nav-grid">${moreItems.map(navBtn).join('')}</div>
     </div>` : '';
   root.innerHTML = `
-    <div class="app-shell${state.view === 'comanda' ? ' is-pos' : ''}">
+    <div class="app-shell${state.view === 'comanda' ? ' is-pos' : ''}${ADMIN_VIEWS.has(state.view) ? ' is-admin' : ''}">
       <nav class="sidenav">
         <div class="sidenav-brand">
           <div class="logo-plate">
             <img src="/logo.png" alt="JR Burger" />
           </div>
           <b>${brand}</b>
-          <span>${tagline || 'Gestión del local'}</span>
+          ${tagline ? `<span>${tagline}</span>` : ''}
         </div>
         <div class="sidenav-links">${sideLinks}</div>
         <div class="sidenav-foot">
@@ -515,13 +544,13 @@ function render() {
       <header class="topbar">
         <div class="brand">
           <div class="logo-plate sm"><img src="/logo.png" alt="${brand}" /></div>
-          <div class="brand-copy"><b>${brand}</b><small>${tagline || 'Gestión del local'}</small></div>
+          <div class="brand-copy"><b>${brand}</b>${tagline ? `<small>${tagline}</small>` : ''}</div>
         </div>
         <div class="grow"></div>
         <span class="chip"><span class="live-dot"></span>${esc(state.user.name)}</span>
         <button class="icon-btn" data-act="logout" title="Salir">Salir</button>
       </header>
-      <main class="page">${state.loading ? pageLoading() : `${licenseBanner()}${setupBanner()}${viewHtml()}`}</main>
+      <main class="page${state.loading || OP_VIEWS.has(state.view) ? '' : ' view-enter'}">${state.loading ? pageLoading() : `${licenseBanner()}${setupBanner()}${viewHtml()}`}</main>
       ${morePanel}
       <nav class="bottom-nav">${bottomLinks}</nav>
     </div>`;
@@ -547,27 +576,36 @@ function lanAccessCard() {
     </div>`;
 }
 
+function brandTagline(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return '';
+  if (/^sistema de gesti[oó]n$/i.test(t)) return '';
+  if (/^gesti[oó]n del local$/i.test(t)) return '';
+  return t;
+}
+
 function loginView() {
   const brand = esc(state.infoName || 'Sistema');
-  const tag = esc(state.infoTagline || 'Sistema de gestión');
+  const tag = esc(brandTagline(state.infoTagline));
   const lic = state.license;
   const licBanner = lic?.expired
-    ? `<div class="alert" style="text-align:left;margin-bottom:14px">El servicio venció${lic.until ? ` el ${esc(lic.until)}` : ''}. Contacte a su proveedor${lic.vendor_phone ? `: ${esc(lic.vendor_phone)}` : ''}.</div>`
+    ? `<div class="alert warn license-banner">El servicio venció${lic.until ? ` el ${esc(lic.until)}` : ''}. Contacte a su proveedor${lic.vendor_phone ? `: ${esc(lic.vendor_phone)}` : ''}.</div>`
     : (lic?.status === 'warning'
-      ? `<div class="alert" style="text-align:left;margin-bottom:14px">El servicio vence en ${lic.days_left} día(s). Avise a su proveedor.</div>`
+      ? `<div class="alert warn license-banner">El servicio vence en ${lic.days_left} día(s). Avise a su proveedor.</div>`
       : '');
   return `
   <div class="login">
     <div class="login-card card">
       <img class="login-logo" src="/logo.png" alt="${brand}" />
       <h1>${brand}</h1>
-      <p class="lede">${tag}</p>
+      ${tag ? `<p class="lede">${tag}</p>` : ''}
+      <p class="login-sub">Mesas, cocina, caja e informes en un solo lugar</p>
       ${licBanner}
       <form data-act="login">
-        <div class="field"><label>Usuario</label><input name="username" autocomplete="username" required /></div>
-        <div class="field"><label>Contraseña</label><input name="password" type="password" autocomplete="current-password" required /></div>
+        <div class="field"><label>Usuario</label><input name="username" autocomplete="username" placeholder="Ej. admin" required /></div>
+        <div class="field"><label>Contraseña</label><input name="password" type="password" autocomplete="current-password" placeholder="••••••••" required /></div>
         <p id="login-error" class="danger-text" hidden></p>
-        <button class="btn primary block lg" type="submit">Entrar</button>
+        <button class="btn primary block lg" type="submit">Entrar al sistema</button>
       </form>
       ${lanAccessCard()}
       <p class="login-foot">v${esc(lic?.app_version || '1.1.0')}</p>
@@ -582,10 +620,10 @@ function licenseBanner() {
     const contact = lic.vendor_phone
       ? `${esc(lic.vendor_name || 'Proveedor')}: ${esc(lic.vendor_phone)}`
       : 'Contacte a su proveedor.';
-    return `<div class="alert license-banner">El servicio de este sistema no está activo. ${contact}</div>`;
+    return `<div class="alert warn license-banner">El servicio de este sistema no está activo. ${contact}</div>`;
   }
   if (lic.status === 'warning') {
-    return `<div class="alert license-banner">Quedan ${lic.days_left} día(s) de servicio. Avise a su proveedor.</div>`;
+    return `<div class="alert warn license-banner">Quedan ${lic.days_left} día(s) de servicio. Avise a su proveedor.</div>`;
   }
   return '';
 }
@@ -596,7 +634,7 @@ function setupBanner() {
   if (state.setup.needs_password) bits.push('cambiar la contraseña de admin');
   if (state.setup.needs_business) bits.push('poner el nombre del restaurante en Ajustes');
   if (!bits.length) return '';
-  return `<div class="alert setup-banner">Para dejar el sistema listo: ${bits.join('; ')}.</div>`;
+  return `<div class="alert info setup-banner">Para dejar el sistema listo: ${bits.join('; ')}.</div>`;
 }
 
 function showChangePasswordModal(forced = false) {
@@ -696,6 +734,9 @@ function panelView() {
         <span class="dash-kpi-label">En salón ahora</span>
         <b class="dash-kpi-value">${money(d.open_sales)}</b>
         <div class="dash-kpi-meta">${d.salon?.open_orders || 0} cuentas abiertas · ${tables.waiting_payment || 0} por cobrar</div>
+        ${tables.waiting_payment > 0
+          ? `<button type="button" class="btn warn sm dash-kpi-btn" data-act="nav-filter" data-view="facturar" data-filter="pay">Cobrar ${tables.waiting_payment}</button>`
+          : ''}
       </article>
       <article class="dash-kpi ${cash.open ? 'ok' : 'warn'}">
         <span class="dash-kpi-label">Caja</span>
@@ -703,12 +744,13 @@ function panelView() {
         <div class="dash-kpi-meta">${cash.open
           ? `Turno abierto · efectivo esp. ${money(cash.summary?.expected_cash)}`
           : 'Abra la caja para cobrar'}</div>
-        <button type="button" class="btn ghost sm" data-act="nav" data-view="caja" style="margin-top:10px">${cash.open ? 'Ver caja' : 'Abrir caja'}</button>
+        <button type="button" class="btn ghost sm dash-kpi-btn" data-act="nav" data-view="caja">${cash.open ? 'Ver caja' : 'Abrir caja'}</button>
       </article>
     </div>
 
     <div class="dash-grid">
       <section class="dash-main">
+        ${hourlyChartHtml(d.hourly)}
         ${salesChartHtml(d.daily)}
         <div class="card dash-pay">
           <div class="ticket-head">Pagos de hoy</div>
@@ -721,13 +763,13 @@ function panelView() {
           }).join('') : '<p class="hint">Aún no hay cobros hoy.</p>'}
         </div>
         <div class="card">
-          <div class="between" style="margin-bottom:10px">
-            <div class="ticket-head" style="margin:0">Últimas cuentas</div>
+          <div class="card-head-row">
+            <div class="ticket-head flush">Últimas cuentas</div>
             <button type="button" class="btn ghost sm" data-act="nav" data-view="facturar">Cobrar</button>
           </div>
           ${recent.length ? `<table class="table dash-table"><thead><tr><th>#</th><th>Mesa</th><th>Hora</th><th>Total</th></tr></thead>
             <tbody>${recent.map((inv) => `
-              <tr>
+              <tr class="click-row" data-act="view-inv" data-id="${inv.id}" tabindex="0" role="button">
                 <td>${esc(inv.number)}</td>
                 <td>${esc(inv.table_name || '—')}</td>
                 <td>${esc(String(inv.created_at || '').slice(11, 16))}</td>
@@ -743,7 +785,9 @@ function panelView() {
           <div class="dash-salon">
             <div><b>${tables.free || 0}</b><span>Libres</span></div>
             <div><b>${tables.occupied || 0}</b><span>Ocupadas</span></div>
-            <div><b>${tables.waiting_payment || 0}</b><span>Por cobrar</span></div>
+            <div class="dash-salon-pay${tables.waiting_payment > 0 ? ' hot' : ''}" ${tables.waiting_payment > 0 ? 'data-act="nav-filter" data-view="facturar" data-filter="pay" role="button" tabindex="0"' : ''}>
+              <b>${tables.waiting_payment || 0}</b><span>Por cobrar</span>
+            </div>
             <div><b>${d.kitchen_pending || 0}</b><span>En cocina</span></div>
           </div>
           <div class="dash-actions">
@@ -768,6 +812,20 @@ function panelView() {
   </div>`;
 }
 
+function filterTables(list) {
+  const f = state.tablesFilter;
+  if (f === 'all') return list;
+  if (f === 'occupied') return list.filter((t) => t.status === 'occupied' || t.joined_to_id);
+  return list.filter((t) => !t.joined_to_id && t.status === f);
+}
+
+function legendChip(key, label, count, pipClass = key) {
+  const on = state.tablesFilter === key ? ' on' : '';
+  return `<button type="button" class="legend-chip${on}" data-act="tables-filter" data-filter="${key}">
+    <i class="pip ${pipClass}"></i> ${label} (${count})
+  </button>`;
+}
+
 function mesasView() {
   const picking = !!(state.joinFrom || state.transferFrom);
   if (picking) state.floorEdit = false;
@@ -788,23 +846,28 @@ function mesasView() {
   const viewToggle = picking ? '' : `
     <button type="button" class="btn ${!isList ? 'primary' : 'ghost'}" data-act="tables-view" data-mode="floor">Plano</button>
     <button type="button" class="btn ${isList ? 'primary' : 'ghost'}" data-act="tables-view" data-mode="list">Lista</button>`;
-  const placed = floorPositions(state.tables);
-  const sorted = [...state.tables].sort((a, b) => String(a.name).localeCompare(String(b.name), 'es', { numeric: true }));
+  const placed = floorPositions(filterTables(state.tables));
+  const sorted = filterTables([...state.tables]).sort((a, b) => String(a.name).localeCompare(String(b.name), 'es', { numeric: true }));
+  const filterBar = picking ? '' : `
+    <div class="legend legend-filters">
+      <button type="button" class="legend-chip${state.tablesFilter === 'all' ? ' on' : ''}" data-act="tables-filter" data-filter="all">Todas</button>
+      ${legendChip('free', 'Libre', counts.free)}
+      ${legendChip('occupied', 'Ocupada', counts.occupied, 'occupied')}
+      ${legendChip('waiting_payment', 'Por cobrar', counts.waiting_payment, 'wait')}
+      ${legendChip('reserved', 'Reservada', counts.reserved, 'reserved')}
+    </div>`;
   return `
     ${pageHead('Mesas', mode, `${viewToggle}${editBtn}`)}
-    ${(state.alerts || []).length ? `<div class="alert">Se está acabando: ${state.alerts.map((a) => esc(a.name)).join(', ')}</div>` : ''}
-    <div class="legend">
-      <span><i class="pip free"></i> Libre (${counts.free})</span>
-      <span><i class="pip occupied"></i> Ocupada (${counts.occupied})</span>
-      <span><i class="pip wait"></i> Por cobrar (${counts.waiting_payment})</span>
-      <span><i class="pip reserved"></i> Reservada (${counts.reserved})</span>
-    </div>
-    ${isList
+    ${(state.alerts || []).length ? `<div class="alert warn">Se está acabando: ${state.alerts.map((a) => esc(a.name)).join(', ')}</div>` : ''}
+    ${filterBar}
+    ${sorted.length === 0 && state.tablesFilter !== 'all'
+      ? `<div class="empty card">No hay mesas con ese filtro. <button type="button" class="btn ghost sm" data-act="tables-filter" data-filter="all">Ver todas</button></div>`
+      : (isList
       ? `<div class="grid tables-grid">${sorted.map(tableCard).join('') || '<div class="empty card">No hay mesas</div>'}</div>`
       : `<div class="floor-map ${state.floorEdit ? 'is-editing' : ''} ${picking ? 'pick-mode' : ''}" id="floor-map">
       <div class="floor-label" aria-hidden="true">Salón</div>
       ${placed.map((t) => floorTable(t)).join('')}
-    </div>`}
+    </div>`)}
     <div class="actions-fab">
       <button class="btn ghost" data-act="cancel-mode" ${picking ? '' : 'hidden'}>Cancelar</button>
     </div>`;
@@ -835,7 +898,7 @@ function floorTable(t) {
   const tag = state.floorEdit ? 'div' : 'button';
   const type = state.floorEdit ? '' : 'type="button"';
   return `
-    <${tag} ${type} class="floor-table ${status} ${joined ? 'joined' : ''} ${t.order ? 'has-order' : ''}"
+    <${tag} ${type} class="floor-table ${status} ${joined ? 'joined' : ''} ${t.order ? 'has-order' : ''}${status === 'waiting_payment' ? ' pay-attention' : ''}"
       data-table-id="${t.id}" ${act}
       style="left:${t._x}%;top:${t._y}%;"
       title="${esc(t.name)} · ${label}">
@@ -851,7 +914,7 @@ function tableCard(t) {
   const label = joined ? `Junto con ${esc(t.joined_to_name)}` : TABLE_STATUS[t.status];
   const extra = t.order ? `${t.order.item_count} productos · ${money(t.order.subtotal)}` : `${t.seats} personas`;
   return `
-    <button class="card table-card ${status} ${joined ? 'joined' : ''} ${t.order ? 'pulse' : ''}"
+    <button class="card table-card ${status} ${joined ? 'joined' : ''} ${t.order ? 'pulse' : ''}${status === 'waiting_payment' ? ' pay-attention' : ''}"
       data-act="table" data-id="${t.id}">
       <div>
         <div class="between"><div class="name">${esc(t.name)}</div><span class="badge ${status}">${label}</span></div>
@@ -939,7 +1002,7 @@ function orderView() {
             <h1>${title}</h1>
             <p>${subtitle}</p>
           </div>
-          ${!billed ? `<input id="pos-search" type="search" class="pos-search" placeholder="Buscar producto…" value="${esc(state.posSearch)}" autocomplete="off" />` : ''}
+          ${!billed ? `<input id="pos-search" type="search" class="pos-search" placeholder="Buscar producto…" value="${esc(state.posSearch)}" autocomplete="off" />` : `<input type="search" class="pos-search" placeholder="Buscar…" disabled aria-hidden="true" tabindex="-1" />`}
         </header>
         ${body}
       </div>
@@ -963,7 +1026,7 @@ function orderView() {
                   <button type="button" data-act="qty" data-id="${it.id}" data-d="-1">−</button>
                   <span>${it.quantity}</span>
                   <button type="button" data-act="qty" data-id="${it.id}" data-d="1">+</button>
-                  <button type="button" class="ghost" data-act="note-item" data-id="${it.id}">Nota</button>
+                  ${orderItemAllowsCustomNotes(it) ? `<button type="button" class="ghost" data-act="note-item" data-id="${it.id}">Nota</button>` : ''}
                   <button type="button" class="ghost danger-text" data-act="cancel-item" data-id="${it.id}">Quitar</button>
                 </div>` : ''}
             </div>`).join('') || '<div class="empty">Toque un producto para agregarlo</div>'}
@@ -983,7 +1046,7 @@ function orderView() {
     </div>
     ${state.ticketOpen ? '<div class="pos-backdrop" data-act="toggle-ticket"></div>' : ''}
     ${billed ? '' : `
-    <div class="pos-dock">
+    <div class="pos-dock${state.cartBump ? ' bump' : ''}">
       <button type="button" class="pos-dock-cart" data-act="toggle-ticket">
         <span>${active.length} prod.</span>
         <b>${money(o.subtotal)}</b>
@@ -1086,7 +1149,7 @@ function billingView() {
     return `
       ${pageHead('Cobrar', 'Ventas ya registradas. Puede reimprimir o anular un ticket.')}
       ${tabs}
-      ${!openCash ? '<div class="alert">Abra la caja para anular tickets.</div>' : ''}
+      ${!openCash ? '<div class="alert warn">Abra la caja para anular tickets.</div>' : ''}
       ${dataPanel({
         id: 'inv-history',
         mode: 'cards',
@@ -1100,7 +1163,7 @@ function billingView() {
   return `
     ${pageHead('Cobrar', 'Mesas que todavía no han pagado. Si pidieron la cuenta, se ven en amarillo.')}
     ${tabs}
-    ${!openCash ? '<div class="alert">Primero abra la caja para poder cobrar.</div>' : ''}
+    ${!openCash ? '<div class="alert warn">Primero abra la caja para poder cobrar.</div>' : ''}
     <div class="grid tables-grid">
       ${payable.map(tableCard).join('') || '<div class="empty card">Nada por cobrar ahora.</div>'}
     </div>`;
@@ -1120,7 +1183,7 @@ function billForm(o, openCash) {
   total = Math.round(total + tip);
   return `
     ${pageHead('Cobrar ' + esc(o.table_name), '', `<button class="btn ghost" data-act="nav" data-view="facturar">Volver</button>`)}
-    ${!openCash ? '<div class="alert">Primero abra la caja.</div>' : ''}
+    ${!openCash ? '<div class="alert warn">Primero abra la caja.</div>' : ''}
     <div class="bill-grid">
       <div class="card">
         <div class="ticket-head">Lo que pidieron</div>
@@ -1192,7 +1255,7 @@ function cashView() {
       <button class="btn ghost" type="button" data-act="bill-history">Ver ventas</button>
       <button class="btn ghost" type="button" data-act="print-cash" data-id="${r.id}">Ticket de apertura</button>`)}
     ${salon?.open_orders || salon?.occupied_tables
-      ? `<div class="alert">Hay ${salon.open_orders || 0} cuenta(s) y ${salon.occupied_tables || 0} mesa(s) ocupada(s). Cóbrelas o reinicie el salón antes de cerrar.</div>` : ''}
+      ? `<div class="alert warn">Hay ${salon.open_orders || 0} cuenta(s) y ${salon.occupied_tables || 0} mesa(s) ocupada(s). Cóbrelas o reinicie el salón antes de cerrar.</div>` : ''}
     <div class="grid stats">
       <div class="stat"><span>Base al abrir</span><b>${money(r.opening_amount)}</b></div>
       <div class="stat"><span>Ventas del turno</span><b>${money(s.sales)}</b></div>
@@ -1265,15 +1328,20 @@ function cashHistory() {
 function inventoryView() {
   const cards = state.ingredients.map((i) => {
     const low = Number(i.stock) <= Number(i.min_stock);
+    const kind = unitKindLabel(i.unit_kind || inferUnitKind(i.unit));
+    const note = i.unit_kind === 'portion' && i.portion_note
+      ? `<div class="small muted">${esc(i.portion_note)}</div>` : '';
     return {
-      search: `${i.name} ${i.unit}`,
+      search: `${i.name} ${i.unit} ${kind}`,
       html: `<div class="card stock-card ${low ? 'low' : ''}" data-card>
           <div class="between"><b>${esc(i.name)}</b><span class="badge ${low ? 'occupied' : 'free'}">${low ? 'Poco' : 'Bien'}</span></div>
+          <div class="stock-kind">${esc(kind)} · ${esc(i.unit)}</div>
           <div class="stock-num">${i.stock} <small>${esc(i.unit)}</small></div>
-          <div class="small muted">Avisar cuando queden ${i.min_stock}</div>
-          <div class="row" style="margin-top:12px">
-            <button class="btn" data-act="move-ing" data-id="${i.id}" data-type="purchase">Reponer</button>
-            <button class="btn ghost" data-act="move-ing" data-id="${i.id}" data-type="waste">Se botó</button>
+          <div class="small muted">Avisar cuando queden ${i.min_stock} ${esc(i.unit)}</div>
+          ${note}
+          <div class="row stock-actions">
+            <button class="btn" data-act="move-ing" data-id="${i.id}" data-type="purchase">Entrada</button>
+            <button class="btn ghost" data-act="move-ing" data-id="${i.id}" data-type="waste">Se desechó</button>
             <button class="btn ghost" data-act="move-ing" data-id="${i.id}" data-type="adjustment">Corregir</button>
             <button class="btn ghost" data-act="edit-ing" data-id="${i.id}">Editar</button>
             <button class="btn danger" data-act="del-ing" data-id="${i.id}">Borrar</button>
@@ -1293,8 +1361,8 @@ function inventoryView() {
     </tr>`
   }));
   return `
-    ${pageHead('Inventario', 'Aquí se ve qué hay en cocina. Al vender, se descuenta solo.', `<button class="btn primary" data-act="new-ing">Agregar ingrediente</button>`)}
-    ${(state.alerts || []).length ? `<div class="alert">Se está acabando: ${state.alerts.map((a) => `${esc(a.name)} (${a.stock} ${esc(a.unit)})`).join(' · ')}</div>` : ''}
+    ${pageHead('Inventario', 'Defina cómo se controla cada insumo (piezas, peso, volumen o porción). Al vender, se descuenta solo.', `<button class="btn primary" data-act="new-ing">Agregar ingrediente</button>`)}
+    ${(state.alerts || []).length ? `<div class="alert warn">Se está acabando: ${state.alerts.map((a) => `${esc(a.name)} (${a.stock} ${esc(a.unit)})`).join(' · ')}</div>` : ''}
     ${dataPanel({
       id: 'inv-cards',
       mode: 'cards',
@@ -1326,7 +1394,7 @@ function productsView() {
     const cat = p.category_name || p.category_name || 'Sin grupo';
     const recipe = (p.recipe || []).map((r) => {
       const iname = r.ingredient_name || r.ingredient_name;
-      return `${r.quantity} ${esc(r.unit)} ${esc(iname)}${Number(r.removable) === 0 ? '' : ' (se puede quitar)'}`;
+      return `${r.quantity} ${esc(r.unit)} de ${esc(iname)}${Number(r.removable) === 0 ? '' : ' (se puede quitar)'}`;
     }).join(' · ') || 'Sin ingredientes anotados';
     return `
         <div class="card catalog-card ${on ? '' : 'is-hidden'}">
@@ -1418,6 +1486,31 @@ function salesChartHtml(daily) {
           return `<div class="chart-col" title="${esc(d.day)}: ${money(d.total)}">
             <div class="chart-bar" style="height:${pct}%"></div>
             <span class="chart-label">${esc(day)}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function hourlyChartHtml(hourly) {
+  const byHour = new Map((hourly || []).map((h) => [Number(h.hour), h]));
+  const nowH = new Date().getHours();
+  const totals = Array.from({ length: 24 }, (_, h) => Number(byHour.get(h)?.total) || 0);
+  const max = Math.max(...totals, 1);
+  const hasAny = totals.some((t) => t > 0);
+  if (!hasAny) {
+    return `<div class="chart-card card"><div class="ticket-head">Ventas por hora (hoy)</div><p class="hint">Aún no hay cobros hoy.</p></div>`;
+  }
+  return `
+    <div class="chart-card card">
+      <div class="ticket-head">Ventas por hora (hoy)</div>
+      <div class="chart-bars hourly" role="img" aria-label="Ventas por hora de hoy">
+        ${totals.map((total, h) => {
+          const pct = total > 0 ? Math.max(6, Math.round(total / max * 100)) : 3;
+          const label = `${String(h).padStart(2, '0')}:00`;
+          return `<div class="chart-col${h === nowH ? ' now' : ''}${total === 0 ? ' empty' : ''}" title="${label}: ${money(total)}">
+            <div class="chart-bar" style="height:${pct}%"></div>
+            <span class="chart-label">${h % 4 === 0 ? h : ''}</span>
           </div>`;
         }).join('')}
       </div>
@@ -1652,6 +1745,36 @@ async function onClick(e) {
   const act = el.dataset.act;
   try {
     if (act === 'nav') { closeModal(); state.moreNav = false; go(el.dataset.view); }
+    if (act === 'nav-filter') {
+      closeModal();
+      state.moreNav = false;
+      if (el.dataset.filter === 'pay') state.billingTab = 'pending';
+      if (el.dataset.view === 'mesas' && el.dataset.filter) state.tablesFilter = el.dataset.filter;
+      go(el.dataset.view);
+      return;
+    }
+    if (act === 'tables-filter') {
+      state.tablesFilter = el.dataset.filter || 'all';
+      render();
+      return;
+    }
+    if (act === 'view-inv') {
+      const data = await api(`/api/invoices/${el.dataset.id}`);
+      const inv = data.invoice;
+      const pays = (inv.payments || []).map((p) => `${PAY[p.method] || p.method}: ${money(p.amount)}`).join(' · ') || '—';
+      modal(`
+        <h3 class="modal-title">Cuenta #${esc(inv.number)}</h3>
+        <p class="hint">${esc(inv.table_name || '—')} · ${esc(inv.cashier_name || '')}</p>
+        <p class="hint">${esc(String(inv.created_at || ''))}</p>
+        <div class="ticket-total between"><span>Total cobrado</span><b>${money(inv.total)}</b></div>
+        <p class="hint">Pagó: ${esc(pays)}</p>
+        <div class="modal-actions row">
+          <button type="button" class="btn ghost" id="inv-close">Cerrar</button>
+          <button type="button" class="btn primary" data-act="reprint-inv" data-id="${inv.id}">Reimprimir</button>
+        </div>`);
+      modalRoot.querySelector('#inv-close')?.addEventListener('click', closeModal);
+      return;
+    }
     if (act === 'toggle-more') { state.moreNav = !state.moreNav; render(); return; }
     if (act === 'kds-station') { state.station = el.dataset.st; await loadView(true); return; }
     if (act === 'tables-view') {
@@ -1938,14 +2061,22 @@ async function onSubmit(e) {
       toast('Guardado');
     }
     if (act === 'save-ing') {
-      const body = { name: obj.name, unit: obj.unit, min_stock: Number(obj.min_stock || 0), stock: Number(obj.stock || 0) };
+      const body = {
+        name: obj.name,
+        unit: obj.unit,
+        unit_kind: obj.unit_kind,
+        portion_note: obj.portion_note || '',
+        min_stock: Number(obj.min_stock || 0),
+        stock: Number(obj.stock || 0)
+      };
       if (obj.id) await api('/api/ingredients/' + obj.id, { method: 'PATCH', body });
       else await api('/api/ingredients', { method: 'POST', body });
       closeModal(); toast('Ingrediente guardado');
     }
     if (act === 'save-move') {
       await api(`/api/ingredients/${obj.id}/move`, { method: 'POST', body: { type: obj.type, quantity: Number(obj.quantity), reason: obj.reason } });
-      closeModal(); toast('Cantidad actualizada');
+      closeModal();
+      toast(obj.type === 'waste' ? 'Desecho registrado' : (obj.type === 'purchase' ? 'Entrada registrada' : 'Cantidad actualizada'));
     }
     if (act === 'save-prod') await saveProd(form);
     if (act === 'save-cat') {
@@ -2127,9 +2258,22 @@ async function addProduct(id) {
   const p = state.products.find((x) => x.id === Number(id));
   const choosable = (p?.recipe || []).filter((r) => Number(r.removable) !== 0 && !/salsa|aderezo/i.test(r.ingredient_name));
   const groups = parseChoices(p);
-  const canAdd = (state.ingredients || []).some((i) => !(p?.recipe || []).some((r) => Number(r.ingredient_id) === Number(i.id)));
+  const allowExtras = productAllowsIngredientExtras(p);
+  const inRecipe = new Set((p?.recipe || []).map((r) => Number(r.ingredient_id)));
+  const canAdd = allowExtras && (state.ingredients || []).some(
+    (i) => !inRecipe.has(Number(i.id)) && isIngredientAddable(i)
+  );
   if (!choosable.length && !groups.length && !canAdd) return addProductNow(id, [], [], '');
-  pickProduct(p, choosable, groups);
+  pickProduct(p, choosable, groups, canAdd);
+}
+
+function productById(id) {
+  return state.products.find((p) => Number(p.id) === Number(id));
+}
+
+function orderItemAllowsCustomNotes(it) {
+  const p = productById(it?.product_id);
+  return p ? productAllowsCustomNotes(p) : false;
 }
 
 function parseChoices(p) {
@@ -2141,7 +2285,9 @@ function parseChoices(p) {
   }
 }
 
-function pickProduct(p, lines, groups) {
+function pickProduct(p, lines, groups, canAdd = false) {
+  const allowNotes = productAllowsCustomNotes(p);
+  const allowPicker = productAllowsIngredientExtras(p);
   const choiceHtml = groups.map((g, gi) => `
     <fieldset class="choice-box">
       <legend>${esc(g.label || 'Elija')}</legend>
@@ -2153,19 +2299,19 @@ function pickProduct(p, lines, groups) {
           </label>`).join('')}
       </div>
     </fieldset>`).join('');
-  const showPicker = lines.length || (state.ingredients || []).length;
+  const showPicker = allowPicker && (lines.length > 0 || canAdd);
   modal(`
     <h3 style="margin-top:0">${esc(p.name)}</h3>
     <form id="ing-pick">
       ${choiceHtml}
       ${showPicker ? burgerPickerHtml(p, lines, esc, state.ingredients || []) : (groups.length ? '<p class="hint">Elija la opción y agregue al pedido.</p>' : '')}
-      <div class="field"><label>Observación (si quiere)</label>
+      ${allowNotes ? `<div class="field"><label>Observación (si quiere)</label>
         <input name="obs" placeholder="Ej. sin salsas, término medio…" autocomplete="off" />
-      </div>
+      </div>` : ''}
       <button class="btn primary block" type="submit">Agregar al pedido</button>
     </form>`);
   const sheet = modalRoot.querySelector('.sheet');
-  if (sheet) sheet.classList.add('sheet-burger');
+  if (sheet && showPicker) sheet.classList.add('sheet-burger');
   const form = modalRoot.querySelector('#ing-pick');
   if (showPicker) bindBurgerPicker(form);
   form.onsubmit = async (ev) => {
@@ -2175,7 +2321,7 @@ function pickProduct(p, lines, groups) {
       const picked = ev.target.querySelector(`input[name="opt_${gi}"]:checked`);
       return picked ? `${g.label}: ${picked.value}` : '';
     }).filter(Boolean);
-    const obs = String(new FormData(ev.target).get('obs') || '').trim();
+    const obs = allowNotes ? String(new FormData(ev.target).get('obs') || '').trim() : '';
     const notes = [...choiceNotes, obs].filter(Boolean).join(' · ');
     const kept = new Set([...ev.target.querySelectorAll('input[name="ing"]:checked')].map((el) => Number(el.value)));
     const removed = lines.filter((r) => !kept.has(r.ingredient_id)).map((r) => ({
@@ -2199,8 +2345,10 @@ async function addProductNow(id, removed, added = [], notes = '') {
       body: { product_id: id, quantity: 1, removed, added, notes }
     });
     state.order = r.order;
+    state.cartBump = true;
     if (r.shortages?.length) toast('Ojo, queda poco: ' + r.shortages.map((s) => s.name).join(', '), true);
     render();
+    setTimeout(() => { state.cartBump = false; }, 420);
   } catch (e) {
     toast(e.message, true);
     if (e.data?.shortages) toast('No alcanza: ' + e.data.shortages.map((s) => `${s.name} (hay ${s.stock}, se necesitan ${s.needed})`).join(', '), true);
@@ -2217,6 +2365,10 @@ async function changeQty(itemId, d) {
 
 async function noteItem(itemId) {
   const it = state.order.items.find((i) => i.id === itemId);
+  if (!orderItemAllowsCustomNotes(it)) {
+    toast('Este producto no admite observaciones', true);
+    return;
+  }
   modal(`
     <h3 style="margin-top:0">Nota · ${esc(it.product_name)}</h3>
     <form data-act="save-note">
@@ -2300,38 +2452,74 @@ function openTicket(print) {
   setTimeout(() => { try { w.focus(); w.print(); } catch { /* impresora ausente no bloquea */ } }, 250);
 }
 
+function refreshIngUnitOptions(kind, currentUnit) {
+  const list = modalRoot.querySelector('#ing-unit-list');
+  const input = modalRoot.querySelector('#ing-unit');
+  const noteWrap = modalRoot.querySelector('#portion-note-wrap');
+  if (!list || !input) return;
+  const units = UNITS_BY_KIND[kind] || UNITS_BY_KIND.count;
+  list.innerHTML = units.map((u) => `<option value="${esc(u)}"></option>`).join('');
+  if (currentUnit) input.value = currentUnit;
+  else if (!units.includes(input.value)) input.value = units[0] || '';
+  if (noteWrap) noteWrap.hidden = kind !== 'portion';
+}
+
 function ingForm(i) {
+  const kind = i?.unit_kind || inferUnitKind(i?.unit || 'unidad');
+  const kindOpts = Object.entries(UNIT_KIND_LABELS).map(([k, label]) =>
+    `<option value="${k}" ${kind === k ? 'selected' : ''}>${label}</option>`
+  ).join('');
   modal(`
     <h3 style="margin-top:0">${i ? 'Editar ingrediente' : 'Agregar ingrediente'}</h3>
     <form data-act="save-ing">
       ${i ? `<input type="hidden" name="id" value="${i.id}" />` : ''}
       <div class="field"><label>Nombre</label><input name="name" required value="${esc(i?.name || '')}" /></div>
-      <div class="field"><label>Cómo se mide (gramos, ml, unidades...)</label><input name="unit" required value="${esc(i?.unit || '')}" /></div>
+      <div class="field">
+        <label>Cómo se controla en cocina</label>
+        <select name="unit_kind" id="ing-unit-kind" required>${kindOpts}</select>
+      </div>
+      <div class="field">
+        <label>Unidad concreta</label>
+        <input name="unit" id="ing-unit" list="ing-unit-list" required value="${esc(i?.unit || '')}" autocomplete="off" />
+        <datalist id="ing-unit-list"></datalist>
+        <p class="hint">Use la misma unidad en las recetas del menú (ej. rodajas, gramos, ml).</p>
+      </div>
+      <div class="field" id="portion-note-wrap"${kind === 'portion' ? '' : ' hidden'}>
+        <label>Qué es una porción (opcional)</label>
+        <input name="portion_note" placeholder="Ej. 1 porción = 2 cucharadas de ripio" value="${esc(i?.portion_note || '')}" />
+      </div>
       ${i ? '' : `<div class="field"><label>Cuánto hay ahora</label><input name="stock" type="number" step="0.01" value="0" /></div>`}
       <div class="field"><label>Avisar cuando queden menos de</label><input name="min_stock" type="number" step="0.01" value="${i?.min_stock ?? 0}" /></div>
       <button class="btn primary block">Guardar</button>
     </form>`);
+  const kindEl = modalRoot.querySelector('#ing-unit-kind');
+  if (kindEl) {
+    kindEl.onchange = () => refreshIngUnitOptions(kindEl.value, '');
+    refreshIngUnitOptions(kind, i?.unit || '');
+  }
 }
 
 function moveForm(id, type) {
   const i = state.ingredients.find((x) => x.id === id);
-  const titles = { purchase: 'Reponer', adjustment: 'Corregir cantidad', waste: 'Se botó / merma' };
+  const unit = esc(i?.unit || '');
+  const titles = { purchase: 'Entrada de mercancía', adjustment: 'Corregir cantidad', waste: 'Se desechó' };
   const qtyLabel = type === 'adjustment'
-    ? 'Cantidad (ponga negativo si hay que bajar)'
-    : (type === 'waste' ? 'Cuánto se botó' : 'Cuánto entra');
+    ? `Cantidad en ${unit} (negativo si hay que bajar)`
+    : (type === 'waste' ? `Cuánto se desechó (${unit})` : `Cuánto entra (${unit})`);
   modal(`
     <h3 style="margin-top:0">${titles[type] || 'Movimiento'} · ${esc(i.name)}</h3>
+    <p class="hint">${esc(unitKindLabel(i.unit_kind || inferUnitKind(i.unit)))} · stock actual: <b>${i.stock} ${unit}</b></p>
     <form data-act="save-move">
       <input type="hidden" name="id" value="${id}" />
       <input type="hidden" name="type" value="${type}" />
       <div class="field"><label>${qtyLabel}</label>
         <input name="quantity" type="number" step="0.01" min="${type === 'waste' ? '0.01' : ''}" required /></div>
-      <div class="field"><label>Nota (si quiere)</label><input name="reason" placeholder="${type === 'waste' ? 'Ej. se dañó, venció…' : ''}" /></div>
+      <div class="field"><label>Nota (si quiere)</label><input name="reason" placeholder="${type === 'waste' ? 'Ej. venció, se dañó, se cayó…' : 'Ej. compra del mercado, proveedor…'}" /></div>
       <button class="btn primary block">Registrar</button>
     </form>`);
 }
 
-const CORE_KINDS = new Set(['bun', 'patty', 'sausage', 'chorizo', 'fries', 'arepa', 'patacon']);
+const CORE_KINDS = new Set(['bun', 'hotdog-bun', 'patty', 'sausage', 'chorizo', 'fries', 'arepa', 'patacon']);
 
 function isCoreIng(name) {
   return CORE_KINDS.has(layerKind(name));
@@ -2433,6 +2621,9 @@ function bindRecipeEditor() {
     }
     const chk = row?.querySelector('input[type="checkbox"]');
     if (chk && !chk.dataset.touched) chk.checked = !isCoreIng(name);
+    const ing = state.ingredients.find((i) => i.id === Number(sel.value));
+    const unitSpan = row?.querySelector('.recipe-unit');
+    if (unitSpan && ing) unitSpan.textContent = `${ing.unit} / producto`;
     refreshRecipeSelects();
   };
   refreshRecipeSelects();
@@ -2494,12 +2685,16 @@ function recipeRow(r, idx) {
   const opts = state.ingredients.length
     ? state.ingredients.map((i) => `<option value="${i.id}" ${chosen?.id === i.id ? 'selected' : ''}>${esc(i.name)} (${esc(i.unit)})</option>`).join('')
     : '<option value="">Sin ingredientes en inventario</option>';
+  const unitLabel = chosen?.unit || '';
   return `<div class="recipe-row">
     <div class="ing-name">
       <select name="ing_${idx}" data-prev="${chosen?.id || ''}">${opts}</select>
       <span class="kind-pill ${kind}" title="${kind === 'extra' ? 'Este nombre aún no tiene icono' : 'Icono del ingrediente'}"></span>
     </div>
-    <input name="qty_${idx}" type="number" step="0.01" min="0" placeholder="Cuánto" value="${r.quantity ?? ''}" />
+    <div class="recipe-qty">
+      <input name="qty_${idx}" type="number" step="0.01" min="0" placeholder="Cant." value="${r.quantity ?? ''}" />
+      <span class="recipe-unit">${esc(unitLabel)} / producto</span>
+    </div>
     <button type="button" class="btn ghost" data-act="del-rec" title="Quitar esta línea">✕</button>
     <label class="chk"><input type="checkbox" name="rem_${idx}" ${rem ? 'checked' : ''} /> Se puede quitar</label>
   </div>`;

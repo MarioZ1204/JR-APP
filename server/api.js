@@ -7,10 +7,12 @@ const {
   nextFloorSlot, presentTable
 } = require('./helpers');
 const inventory = require('./inventory');
+const { normalizeUnitKind, normalizeUnit } = require('./unit-kinds');
 const { saveBackup, listBackups, scheduleRestore } = require('./backup');
 const { printInvoice, printTest, printKitchenOrder, printCashOpen, printCashExpense, printCashClose } = require('./print');
 const { lanUrls } = require('./lan');
 const { publicLicense, APP_VERSION } = require('./license');
+const { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes, productHasChoices } = require('./ingredient-rules');
 
 function fail(res, status, message) {
   return res.status(status).json({ error: message });
@@ -42,7 +44,7 @@ function mountApi(app) {
     const s = getAllSettings();
     res.json({
       business_name: getSetting('business_name', 'Mi Restaurante'),
-      business_tagline: getSetting('business_tagline', 'Sistema de gestión'),
+      business_tagline: getSetting('business_tagline', ''),
       lan_urls: lanUrls(Number(process.env.PORT || 3000)),
       license: publicLicense(),
       app_version: APP_VERSION
@@ -359,13 +361,20 @@ function mountApi(app) {
     if (!order || ['billed', 'cancelled'].includes(order.status)) {
       return res.status(400).json({ error: 'Este pedido ya está cerrado' });
     }
-    const product = db().prepare('SELECT * FROM products WHERE id = ? AND active = 1').get(req.body.product_id);
+    const product = db().prepare(`
+      SELECT p.*, c.name AS category_name
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.id = ? AND p.active = 1
+    `).get(req.body.product_id);
     if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
     const quantity = Math.max(1, Number(req.body.quantity || 1));
-    const notes = String(req.body.notes || '').trim();
+    let notes = String(req.body.notes || '').trim();
+    if (!productAllowsCustomNotes(product) && !productHasChoices(product)) notes = '';
     const recipe = inventory.recipeForProduct(product.id);
     const allowed = new Set(recipe.filter((l) => Number(l.removable) !== 0).map((l) => l.ingredient_id));
     const inRecipe = new Set(recipe.map((l) => l.ingredient_id));
+    const allowExtras = productAllowsIngredientExtras(product);
     const removed = (Array.isArray(req.body.removed) ? req.body.removed : [])
       .map((x) => {
         const id = Number(x.id != null ? x.id : x);
@@ -374,15 +383,17 @@ function mountApi(app) {
         return { id, name: line.name };
       })
       .filter(Boolean);
-    const added = (Array.isArray(req.body.added) ? req.body.added : [])
-      .map((x) => {
-        const id = Number(x.id != null ? x.id : x);
-        if (!id || inRecipe.has(id)) return null;
-        const ing = db().prepare('SELECT id, name FROM ingredients WHERE id = ?').get(id);
-        if (!ing) return null;
-        return { id: ing.id, name: ing.name, quantity: 1 };
-      })
-      .filter(Boolean);
+    const added = allowExtras
+      ? (Array.isArray(req.body.added) ? req.body.added : [])
+        .map((x) => {
+          const id = Number(x.id != null ? x.id : x);
+          if (!id || inRecipe.has(id)) return null;
+          const ing = db().prepare('SELECT id, name FROM ingredients WHERE id = ?').get(id);
+          if (!ing || !isIngredientAddable(ing)) return null;
+          return { id: ing.id, name: ing.name, quantity: 1 };
+        })
+        .filter(Boolean)
+      : [];
     const removedJson = JSON.stringify(removed);
     const addedJson = JSON.stringify(added);
     const stock = inventory.checkStock(product.id, quantity, removedJson, addedJson);
@@ -410,8 +421,17 @@ function mountApi(app) {
       return res.status(400).json({ error: 'Ya no se puede cambiar' });
     }
     if (item.status === 'cancelled') return res.status(400).json({ error: 'Ese producto ya se quitó' });
+    const product = db().prepare(`
+      SELECT p.*, c.name AS category_name
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.id = ?
+    `).get(item.product_id);
     const quantity = req.body.quantity != null ? Math.max(1, Number(req.body.quantity)) : item.quantity;
-    const notes = req.body.notes != null ? String(req.body.notes).trim() : item.notes;
+    let notes = req.body.notes != null ? String(req.body.notes).trim() : item.notes;
+    if (req.body.notes != null && product && !productAllowsCustomNotes(product) && notes !== String(item.notes || '').trim()) {
+      return fail(res, 400, 'Este producto no admite observaciones');
+    }
     if (quantity !== item.quantity) {
       const stock = inventory.checkStock(item.product_id, quantity, item.removed_json, item.added_json);
       const block = getSetting('block_on_no_stock', '0') === '1';
@@ -751,13 +771,16 @@ function mountApi(app) {
 
   app.post('/api/ingredients', requireAuth, requireRole(), (req, res) => {
     const name = String(req.body.name || '').trim();
-    const unit = String(req.body.unit || '').trim();
-    if (!name || !unit) return fail(res, 400, 'Falta el nombre o cómo se mide');
+    const unitRaw = String(req.body.unit || '').trim();
+    const unit_kind = normalizeUnitKind(req.body.unit_kind, unitRaw);
+    const unit = normalizeUnit(unit_kind, unitRaw);
+    const portion_note = unit_kind === 'portion' ? String(req.body.portion_note || '').trim() : '';
+    if (!name || !unit) return fail(res, 400, 'Falta el nombre o la unidad');
     const dup = db().prepare('SELECT id FROM ingredients WHERE lower(name) = lower(?)').get(name);
     if (dup) return fail(res, 400, 'Ya hay un ingrediente con ese nombre');
     const info = db().prepare(
-      'INSERT INTO ingredients (name, unit, stock, min_stock) VALUES (?, ?, ?, ?)'
-    ).run(name, unit, 0, Number(req.body.min_stock || 0));
+      'INSERT INTO ingredients (name, unit, unit_kind, portion_note, stock, min_stock) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(name, unit, unit_kind, portion_note, 0, Number(req.body.min_stock || 0));
     const qty = Number(req.body.stock || 0);
     if (qty) {
       inventory.moveStock({
@@ -776,9 +799,17 @@ function mountApi(app) {
     if (!name) return fail(res, 400, 'Falta el nombre');
     const dup = db().prepare('SELECT id FROM ingredients WHERE lower(name) = lower(?) AND id != ?').get(name, i.id);
     if (dup) return fail(res, 400, 'Ya hay un ingrediente con ese nombre');
-    db().prepare('UPDATE ingredients SET name = ?, unit = ?, min_stock = ? WHERE id = ?')
-      .run(name,
-        req.body.unit != null ? String(req.body.unit).trim() : i.unit,
+    const unit_kind = req.body.unit_kind != null
+      ? normalizeUnitKind(req.body.unit_kind, req.body.unit ?? i.unit)
+      : (i.unit_kind || normalizeUnitKind(null, i.unit));
+    const unit = req.body.unit != null
+      ? normalizeUnit(unit_kind, String(req.body.unit).trim())
+      : i.unit;
+    const portion_note = unit_kind === 'portion'
+      ? (req.body.portion_note != null ? String(req.body.portion_note).trim() : (i.portion_note || ''))
+      : '';
+    db().prepare('UPDATE ingredients SET name = ?, unit = ?, unit_kind = ?, portion_note = ?, min_stock = ? WHERE id = ?')
+      .run(name, unit, unit_kind, portion_note,
         req.body.min_stock != null ? Number(req.body.min_stock) : i.min_stock,
         i.id);
     emit(req, 'inventory:changed', {});
@@ -1300,6 +1331,21 @@ function mountApi(app) {
     res.json({ user: publicUser(db().prepare('SELECT * FROM users WHERE id = ?').get(u.id)) });
   });
 
+  // —— Contadores para navegación (ligero) ——
+  app.get('/api/nav-counts', requireAuth, (req, res) => {
+    const kitchenPending = db().prepare(`
+      SELECT COUNT(*) AS n FROM order_items
+      WHERE sent = 1 AND status IN ('pending','preparing')
+    `).get().n;
+    const waitingPayment = db().prepare(`
+      SELECT COUNT(*) AS n FROM restaurant_tables WHERE status = 'waiting_payment'
+    `).get().n;
+    const openOrders = db().prepare(`
+      SELECT COUNT(*) AS n FROM orders WHERE status NOT IN ('billed','cancelled')
+    `).get().n;
+    res.json({ kitchen_pending: kitchenPending, waiting_payment: waitingPayment, open_orders: openOrders });
+  });
+
   // —— Panel de control ——
   app.get('/api/dashboard', requireAuth, requireRole(), (req, res) => {
     const dayRow = db().prepare("SELECT date('now','localtime') AS d, date('now','localtime','-1 day') AS y, date('now','localtime','-6 day') AS w0").get();
@@ -1324,6 +1370,13 @@ function mountApi(app) {
       FROM invoices WHERE status = 'paid' AND created_at >= ? AND created_at <= ?
       GROUP BY day ORDER BY day
     `).all(dayStart(weekFrom), dayEnd(today));
+
+    const hourly = db().prepare(`
+      SELECT CAST(strftime('%H', created_at) AS INTEGER) AS hour,
+             COUNT(*) AS tickets, COALESCE(SUM(total), 0) AS total
+      FROM invoices WHERE status = 'paid' AND created_at >= ? AND created_at <= ?
+      GROUP BY hour ORDER BY hour
+    `).all(dayStart(today), dayEnd(today));
 
     const methods = db().prepare(`
       SELECT p.method, SUM(p.amount) AS total
@@ -1392,6 +1445,7 @@ function mountApi(app) {
       yesterday: { date: yesterday, ...yesterdayT },
       week: { from: weekFrom, to: today, ...weekT },
       daily,
+      hourly,
       methods,
       top_products: topProducts,
       tables,

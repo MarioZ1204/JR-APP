@@ -1,0 +1,27 @@
+﻿================================================================================
+  JR â€” SISTEMA PARA EL RESTAURANTE (cliente)
+================================================================================
+
+PRIMERA VEZ EN ESTE PC
+  1. El proveedor debe haber copiado producto.key dentro de esta carpeta
+  2. Doble clic en instalar.bat
+  3. Luego use iniciar.bat o el acceso directo "JR Sistema"
+
+CADA DIA
+  Doble clic en iniciar.bat â€” deje la ventana abierta durante el servicio
+
+CELULARES / TABLETS
+  Misma WiFi del local. Abra http://IP-DEL-PC:3000
+  Si no entra: permitir-red.bat
+
+USUARIOS INICIALES (cambie las contraseÃ±as)
+  admin / admin123
+  mesero / mesero123
+  cocina / cocina123
+  cajero / cajero123
+
+La licencia NO se activa desde la app. El proveedor instala la clave con
+instalar.bat o renovar.bat (carpeta Key del proveedor).
+
+Mas detalle: INSTRUCCIONES-INSTALACION.txt
+================================================================================

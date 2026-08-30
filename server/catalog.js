@@ -42,7 +42,7 @@ const INGREDIENTS = [
   ['Maicitos', 'porción', 40, 10],
   ['Ripio', 'porción', 50, 12],
   ['Lechuga', 'porción', 50, 12],
-  ['Tomate', 'porción', 50, 12],
+  ['Tomate', 'rodaja', 50, 12],
   ['Salsa tocineta', 'porción', 40, 10],
   ['Salsa de ajo', 'porción', 40, 10],
   ['Cerdo desmechado en miel', 'porción', 20, 5]
@@ -52,7 +52,7 @@ const H_BASE = [
   ['Pan hamburguesa', 1, 0],
   ['Ripio', 1, 1],
   ['Lechuga', 1, 1],
-  ['Tomate', 1, 1]
+  ['Tomate', 2, 1]
 ];
 
 const D_BASE = [
@@ -241,8 +241,9 @@ function ensureCat(db, name, sort, station) {
 function ensureIng(db, name, unit, stock, min) {
   const row = db.prepare('SELECT id FROM ingredients WHERE name = ?').get(name);
   if (row) return row.id;
-  return db.prepare('INSERT INTO ingredients (name, unit, stock, min_stock) VALUES (?, ?, ?, ?)')
-    .run(name, unit, stock, min).lastInsertRowid;
+  const { inferUnitKind } = require('./unit-kinds');
+  return db.prepare('INSERT INTO ingredients (name, unit, unit_kind, stock, min_stock) VALUES (?, ?, ?, ?, ?)')
+    .run(name, unit, inferUnitKind(unit), stock, min).lastInsertRowid;
 }
 
 function seedCatalog(db) {
@@ -298,6 +299,65 @@ function seedCatalog(db) {
 
   db.prepare("UPDATE products SET name = 'Gaseosa 1L' WHERE name = 'Gaseosa 1.5L'").run();
   patchRipioAndSauces(db);
+  patchIngredientsV3(db);
+}
+
+function mergeIngredient(db, fromName, toName) {
+  const from = db.prepare('SELECT * FROM ingredients WHERE name = ?').get(fromName);
+  const to = db.prepare('SELECT * FROM ingredients WHERE name = ?').get(toName);
+  if (!from) return;
+  if (!to) {
+    db.prepare('UPDATE ingredients SET name = ? WHERE id = ?').run(toName, from.id);
+    return;
+  }
+  if (from.id === to.id) return;
+
+  const dupes = db.prepare(`
+    SELECT r1.product_id FROM recipes r1
+    JOIN recipes r2 ON r1.product_id = r2.product_id AND r2.ingredient_id = ?
+    WHERE r1.ingredient_id = ?
+  `).all(to.id, from.id);
+  for (const row of dupes) {
+    db.prepare('DELETE FROM recipes WHERE product_id = ? AND ingredient_id = ?').run(row.product_id, from.id);
+  }
+
+  db.prepare('UPDATE recipes SET ingredient_id = ? WHERE ingredient_id = ?').run(to.id, from.id);
+  db.prepare('UPDATE ingredients SET stock = stock + ? WHERE id = ?').run(from.stock || 0, to.id);
+  db.prepare('UPDATE inventory_movements SET ingredient_id = ? WHERE ingredient_id = ?').run(to.id, from.id);
+  db.prepare('DELETE FROM ingredients WHERE id = ?').run(from.id);
+}
+
+function deleteIngredient(db, name) {
+  const row = db.prepare('SELECT id FROM ingredients WHERE name = ?').get(name);
+  if (!row) return;
+  db.prepare('DELETE FROM recipes WHERE ingredient_id = ?').run(row.id);
+  db.prepare('DELETE FROM inventory_movements WHERE ingredient_id = ?').run(row.id);
+  db.prepare('DELETE FROM ingredients WHERE id = ?').run(row.id);
+}
+
+function patchIngredientsV3(db) {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'jr_ing_v3'").get();
+  if (done) return;
+
+  mergeIngredient(db, 'Pan de hamburguesa', 'Pan hamburguesa');
+  mergeIngredient(db, 'Carne molida', 'Carne de hamburguesa');
+  mergeIngredient(db, 'Papa', 'Papa a la francesa');
+
+  const carne = db.prepare("SELECT id FROM ingredients WHERE name = 'Carne de hamburguesa'").get();
+  if (carne) {
+    db.prepare('UPDATE recipes SET quantity = 1 WHERE ingredient_id = ? AND quantity > 5').run(carne.id);
+  }
+  const papas = db.prepare("SELECT id FROM ingredients WHERE name = 'Papa a la francesa'").get();
+  if (papas) {
+    db.prepare('UPDATE recipes SET quantity = 1 WHERE ingredient_id = ? AND quantity > 10').run(papas.id);
+  }
+
+  deleteIngredient(db, 'Mezcla brownie');
+  deleteIngredient(db, 'Aceite');
+
+  db.prepare("UPDATE products SET active = 0 WHERE name IN ('Brownie', 'Papas fritas')").run();
+
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('jr_ing_v3', '1')").run();
 }
 
 function patchRipioAndSauces(db) {

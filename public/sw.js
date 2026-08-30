@@ -1,15 +1,21 @@
 /* JR Burger — service worker (caché de la interfaz; la API siempre va a la red) */
-const CACHE = 'jr-burger-v45';
+const CACHE = 'jr-burger-v53';
 const SHELL = [
   '/',
   '/index.html',
-  '/css/app.css?v=48',
+  '/css/fonts.css?v=56',
+  '/css/app.css?v=56',
   '/js/api.js',
-  '/js/app.js?v=48',
-  '/js/burger-pick.js?v=48',
+  '/js/app.js?v=56',
+  '/js/burger-pick.js?v=56',
   '/favicon.svg',
   '/logo.png',
-  '/manifest.webmanifest'
+  '/manifest.webmanifest',
+  '/fonts/outfit-400.ttf',
+  '/fonts/outfit-500.ttf',
+  '/fonts/outfit-600.ttf',
+  '/fonts/outfit-700.ttf',
+  '/fonts/alfa-slab-one.ttf'
 ];
 
 self.addEventListener('install', (event) => {

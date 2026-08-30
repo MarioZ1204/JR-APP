@@ -57,11 +57,38 @@ export const ORDER_STATUS = {
 };
 
 export const MOVE_TYPE = {
-  purchase: 'Compra',
+  purchase: 'Entrada',
   sale: 'Venta',
   adjustment: 'Corrección',
-  waste: 'Se botó'
+  waste: 'Se desechó'
 };
+
+export const UNIT_KIND_LABELS = {
+  count: 'Por piezas',
+  weight: 'Por peso',
+  volume: 'Por volumen',
+  portion: 'Por porción de cocina'
+};
+
+export const UNITS_BY_KIND = {
+  count: ['unidad', 'rodaja', 'loncha', 'rebanada', 'pieza', 'hoja'],
+  weight: ['g', 'kg'],
+  volume: ['ml', 'L'],
+  portion: ['porción']
+};
+
+export function inferUnitKind(unit) {
+  const u = String(unit || '').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (['g', 'kg', 'gramo', 'gramos', 'kilogramo', 'kilogramos'].includes(u)) return 'weight';
+  if (['ml', 'l', 'litro', 'litros', 'cc'].includes(u)) return 'volume';
+  if (['porcion', 'porciones'].includes(u)) return 'portion';
+  return 'count';
+}
+
+export function unitKindLabel(kind) {
+  return UNIT_KIND_LABELS[kind] || UNIT_KIND_LABELS.count;
+}
 
 export const PAY = {
   efectivo: 'Efectivo',

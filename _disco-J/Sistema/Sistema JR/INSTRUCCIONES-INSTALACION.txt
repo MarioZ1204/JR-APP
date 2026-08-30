@@ -1,0 +1,245 @@
+================================================================================
+  JR — Sistema de restaurante (POS local)
+  Instrucciones de instalación y entrega al cliente
+  Versión 1.1.0
+================================================================================
+
+Este documento explica qué debe llevar la carpeta, cómo instalarla en el PC
+del restaurante y qué ocurre la primera vez que se ejecuta el sistema.
+
+
+--------------------------------------------------------------------------------
+1. REQUISITOS DEL PC DEL RESTAURANTE
+--------------------------------------------------------------------------------
+
+  • Windows 10 u 11 (64 bits recomendado)
+  • Node.js versión 22 o superior (LTS desde https://nodejs.org)
+    Comprobar en CMD o PowerShell:  node -v
+  • Conexión WiFi/LAN en el local (tablets y celulares en la misma red)
+  • Navegador: Chrome o Edge (actualizado)
+
+  NO se necesita:
+  • XAMPP, MySQL, Apache ni hosting en internet
+  • Instalar SQLite por separado (viene integrado en Node.js 22+)
+
+
+--------------------------------------------------------------------------------
+2. QUÉ ARCHIVOS DEBE TENER LA CARPETA (ESTRUCTURA)
+--------------------------------------------------------------------------------
+
+Copie la carpeta completa del proyecto. Estructura mínima:
+
+  JR-APP/
+  │
+  ├── iniciar.bat              ← El restaurante usa esto cada día
+  ├── instalar.bat             ← Solo la primera vez (con clave de producto)
+  ├── permitir-red.bat         ← Si celulares no entran (firewall Windows)
+  ├── package.json
+  ├── package-lock.json
+  │
+  ├── proveedor/               ← Herramientas del proveedor (no mostrar al cliente)
+  │   ├── generar-clave.bat
+  │   └── renovar.bat
+  │
+  ├── server/                  ← Backend (Node.js + SQLite)
+  ├── public/                  ← Interfaz web (HTML, CSS, JS)
+  ├── scripts/                 ← Utilidades (licencia, respaldo, pruebas)
+  │
+  ├── docs/                    ← Documentación opcional
+  ├── README.md
+  └── INSTRUCCIONES-INSTALACION.txt   ← Este archivo
+
+  Carpetas que NO van en la copia inicial (se crean solas):
+  ├── node_modules/            ← Se genera con npm install (iniciar.bat lo hace)
+  ├── data/                    ← Base de datos (se crea al primer arranque)
+  └── backups/                 ← Copias de seguridad automáticas
+
+  Archivo que USTED (proveedor) debe generar y copiar al restaurante:
+  └── producto.key             ← Clave de alquiler (una línea, tipo JR1....)
+
+  Recursos visuales recomendados (si los tiene en su paquete):
+  ├── public/logo.png
+  ├── public/BCKGROUND.jpeg
+  ├── public/apple-touch-icon.png
+  ├── public/icons/cats/*.png
+  └── public/icons/ings/*.png
+
+  Si faltan imágenes, el sistema funciona igual; solo se verán sin logo o
+  iconos de categorías.
+
+
+--------------------------------------------------------------------------------
+3. ¿LA BASE DE DATOS SE CREA SOLA?
+--------------------------------------------------------------------------------
+
+  SÍ. Al ejecutar iniciar.bat (o npm start) por primera vez:
+
+  1. Se crea la carpeta  data/
+  2. Se crea el archivo  data/restaurante.db  (SQLite)
+  3. Se crean las tablas automáticamente
+  4. Se cargan datos iniciales:
+     • 4 usuarios (admin, mesero, cocina, cajero)
+     • 2 mesas de ejemplo
+     • Menú de demostración (categorías, productos, ingredientes, recetas)
+     • Ajustes por defecto (nombre "Mi Restaurante", IVA 0 %, etc.)
+  5. Se guarda una copia de respaldo en backups/ (una por día)
+
+  NO hace falta ejecutar scripts SQL ni importar nada manualmente.
+
+  Archivos de base de datos:
+  • data/restaurante.db       — datos del negocio
+  • data/restaurante.db-wal   — temporal mientras el sistema está abierto
+  • data/restaurante.db-shm   — temporal mientras el sistema está abierto
+
+  Para respaldar: copie data/restaurante.db o la carpeta backups/ a un USB.
+
+
+--------------------------------------------------------------------------------
+4. FLUJO PARA EL PROVEEDOR (USTED) — ANTES DE ENTREGAR
+--------------------------------------------------------------------------------
+
+  PASO A — En su PC de trabajo
+  ─────────────────────────────
+  1. Abra:  proveedor\generar-clave.bat
+  2. Indique nombre del restaurante y fecha de vencimiento (AAAA-MM-DD)
+  3. Se crea el archivo  producto.key  en la raíz del proyecto
+
+  PASO B — Preparar la carpeta para el cliente
+  ─────────────────────────────────────────────
+  1. Copie toda la carpeta JR-APP a un USB o al PC del restaurante
+  2. Incluya  producto.key  en la raíz (junto a instalar.bat)
+  3. (Opcional) Configure su teléfono de soporte antes de instalar:
+       node scripts/set-vendor.js --name "Su empresa" --phone "300..." --wa "300..."
+
+  PASO C — En el PC del restaurante (primera vez)
+  ───────────────────────────────────────────────
+  1. Instale Node.js 22+ si no lo tiene
+  2. Doble clic en  instalar.bat
+     • Instala dependencias (npm install)
+     • Aplica la clave de producto
+     • Pregunta si dejar el sistema limpio (recomendado: Sí)
+     • Crea acceso directo "JR Sistema" en el escritorio
+  3. Use  iniciar.bat  o el acceso directo para abrir el sistema
+  4. Entre con  admin / admin123  y cambie la contraseña al instante
+  5. En Ajustes: nombre del restaurante, NIT, impresora, mesas, personal
+
+  RENOVAR ALQUILER (meses después)
+  ────────────────────────────────
+  1. Cierre el sistema (ventana de iniciar.bat)
+  2. Genere nueva clave → copie producto.key al PC del local
+  3. Ejecute  proveedor\renovar.bat
+  4. Vuelva a abrir con iniciar.bat
+
+  El restaurante NO ve pantallas para activar licencia; todo es oculto.
+
+
+--------------------------------------------------------------------------------
+5. USO DIARIO EN EL RESTAURANTE
+--------------------------------------------------------------------------------
+
+  ARRANCAR
+  • Doble clic en iniciar.bat
+  • Deje la ventana negra ABIERTA todo el servicio
+  • Se abre el navegador en http://localhost:3000
+
+  TABLETS / CELULARES
+  • En la ventana negra aparece una IP, por ejemplo:
+      http://192.168.0.104:3000
+  • Abra esa URL en Chrome/Edge del celular (misma WiFi, NO datos móviles)
+  • Si no entra: ejecute permitir-red.bat como administrador
+
+  APAGAR
+  • Cierre caja si hay turno abierto
+  • Cierre la ventana de iniciar.bat o Ctrl+C
+
+
+--------------------------------------------------------------------------------
+6. USUARIOS INICIALES (CAMBIAR CONTRASEÑAS)
+--------------------------------------------------------------------------------
+
+  Usuario    Contraseña     Rol
+  ────────   ────────────   ──────────────
+  admin      admin123       Jefe (todo)
+  mesero     mesero123      Mesas y comandas
+  cocina     cocina123      Pantalla cocina
+  cajero     cajero123      Cobrar y caja
+
+  La primera vez el sistema pide cambiar contraseña. Cree usuarios reales
+  en Personal y desactive los de demostración si lo desea.
+
+
+--------------------------------------------------------------------------------
+7. QUÉ NO COPIAR / NO SUBIR A GIT
+--------------------------------------------------------------------------------
+
+  • node_modules/     — se regenera con npm install
+  • data/             — base de datos del local (privada)
+  • backups/          — copias del local
+  • producto.key      — clave del cliente
+  • data/product.key  — copia interna de la clave
+  • data/rental.lock  — marca instalación con alquiler activo
+
+
+--------------------------------------------------------------------------------
+8. COMANDOS ÚTILES (LÍNEA DE COMANDOS)
+--------------------------------------------------------------------------------
+
+  npm install              Instalar dependencias
+  npm start                Iniciar servidor manualmente
+  npm run backup           Copia manual de la base de datos
+  npm test                 Prueba automática de funciones (42 pruebas)
+  npm run license -- "Local" 2027-12-31   Generar clave (alternativa al .bat)
+
+
+--------------------------------------------------------------------------------
+9. PRUEBA AUTOMÁTICA DEL SISTEMA
+--------------------------------------------------------------------------------
+
+  Para verificar que todo funciona antes de entregar al cliente:
+
+    npm test
+
+  Ejecuta 42 pruebas: login por rol, mesas, comanda, cocina, caja, cobro,
+  informes, panel, respaldos, licencia, permisos, etc.
+
+  Usa una base de datos temporal en data/smoke-test-run/ (no toca la del local).
+
+
+--------------------------------------------------------------------------------
+10. SOLUCIÓN DE PROBLEMAS FRECUENTES
+--------------------------------------------------------------------------------
+
+  "No se encontró Node.js"
+  → Instale Node.js 22+ desde https://nodejs.org y reinicie el PC
+
+  "Cannot find module 'express'"
+  → Ejecute npm install o vuelva a ejecutar iniciar.bat
+
+  El celular no abre la página
+  → Misma WiFi, use la IP con :3000 al final, ejecute permitir-red.bat
+
+  "Falta la clave de producto" al instalar
+  → Copie producto.key generado con proveedor\generar-clave.bat
+
+  "El servicio venció" (solo personal, no admin)
+  → Renueve con proveedor\renovar.bat y nueva producto.key
+
+  Pantalla en blanco o cambios no se ven
+  → Ctrl+F5 en el navegador (recarga forzada)
+
+  Impresora
+  → Ver docs/IMPRESORA.md (ticket HTML o impresora USB Windows)
+
+
+--------------------------------------------------------------------------------
+11. RESUMEN RÁPIDO
+--------------------------------------------------------------------------------
+
+  Proveedor:  generar-clave.bat → copiar carpeta + producto.key → instalar.bat
+  Restaurante: iniciar.bat → admin → cambiar clave → configurar → usar
+  Base datos:  SE CREA SOLA en data/restaurante.db
+  Internet:    NO obligatorio (solo red local del restaurante)
+
+================================================================================
+  Fin del documento
+================================================================================

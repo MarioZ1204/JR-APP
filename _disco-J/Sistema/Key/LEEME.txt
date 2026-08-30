@@ -1,0 +1,25 @@
+﻿================================================================================
+  JR â€” Carpeta KEY (solo proveedor)
+================================================================================
+
+Esta carpeta NO va al restaurante. QuÃ©dese en su PC o USB de soporte.
+
+ARCHIVOS
+  generar-clave.bat   Crea producto.key para un cliente y fecha de vencimiento
+  renovar.bat         Aplica una clave nueva en el PC del cliente (sistema cerrado)
+  producto.key        Se genera aqui al crear una clave
+
+FLUJO â€” INSTALACION NUEVA
+  1. Ejecute generar-clave.bat
+  2. Copie producto.key dentro de la carpeta "Sistema JR"
+  3. Lleve "Sistema JR" al PC del restaurante
+  4. Alli ejecute instalar.bat (solo la primera vez)
+
+FLUJO â€” RENOVACION
+  1. Generar clave nueva (generar-clave.bat)
+  2. Cierre el sistema en el restaurante (ventana iniciar.bat)
+  3. Ejecute renovar.bat e indique la ruta de "Sistema JR" en ese PC
+     (puede llevar esta carpeta Key en USB con el producto.key nuevo)
+
+REQUISITO: Node.js 22+ instalado en el PC donde ejecute estos .bat
+================================================================================

@@ -1,3 +1,5 @@
+import { isIngredientAddable, productAllowsIngredientExtras } from './ingredient-rules.js?v=56';
+
 function fold(name) {
   return String(name || '')
     .toLowerCase()
@@ -61,6 +63,8 @@ const KIND_RULES = [
   [/camaron|shrimp|langostino/, 'shrimp'],
   [/pescado|salmon|atun|filete de pescado/, 'fish'],
   [/pollo|pechuga|nugget|pavo/, 'chicken'],
+  [/aceite/, 'oil'],
+  [/pan perro|pan de perro/, 'hotdog-bun'],
   [/\bpan\b|brioche|ciabatta|baguette/, 'bun'],
   [/carne|res|patty|molida|hamburguesa/, 'patty']
 ];
@@ -108,15 +112,22 @@ const SHAPE_PHOTO = {
 
 function ingSrc(kind) {
   const k = kind || 'extra';
+  if (k === 'hotdog-bun') {
+    const path = '/icons/cats/perro.png?v=54';
+    return { path, fallback: path };
+  }
   return {
-    path: `/icons/ings/${k}.png?v=38`,
-    fallback: `/icons/ings/extra.png?v=38`
+    path: `/icons/ings/${k}.png?v=54`,
+    fallback: `/icons/ings/extra.png?v=54`
   };
 }
 
-function dishPhoto(shape) {
+function dishPhoto(shape, p) {
+  const cat = fold(p?.category_name || '');
+  if (/bebida/.test(cat)) return '/icons/cats/bebida.png?v=54';
+  if (/adicional/.test(cat)) return '/icons/cats/adicional.png?v=54';
   const key = SHAPE_PHOTO[shape] || 'especial';
-  return `/icons/cats/${key}.png?v=38`;
+  return `/icons/cats/${key}.png?v=54`;
 }
 
 const SKIP_KINDS = new Set(['ketchup', 'mustard', 'mayo', 'ranch', 'bbq', 'cream', 'sauce', 'honey', 'garlic']);
@@ -142,8 +153,9 @@ function chipBtn(r, mode) {
 export function burgerPickerHtml(p, choosable, esc, allIngredients = []) {
   const recipe = p.recipe || [];
   const shape = dishShape(p);
-  const photo = dishPhoto(shape);
+  const photo = dishPhoto(shape, p);
   const inRecipe = new Set(recipe.map((r) => Number(r.ingredient_id)));
+  const allowAdd = productAllowsIngredientExtras(p);
 
   const fixed = recipe.filter((r) => {
     if (Number(r.removable) === 0) return true;
@@ -156,13 +168,16 @@ export function burgerPickerHtml(p, choosable, esc, allIngredients = []) {
     return !SKIP_KINDS.has(kind) && !/salsa|aderezo/i.test(r.ingredient_name);
   });
 
-  const addable = (allIngredients || [])
-    .filter((i) => !inRecipe.has(Number(i.id)))
-    .filter((i) => {
-      const kind = layerKind(i.name);
-      return !SKIP_KINDS.has(kind) && !/salsa|aderezo/i.test(i.name);
-    })
-    .sort((a, b) => String(a.name).localeCompare(String(b.name), 'es'));
+  const addable = allowAdd
+    ? (allIngredients || [])
+      .filter((i) => !inRecipe.has(Number(i.id)))
+      .filter((i) => isIngredientAddable(i))
+      .filter((i) => {
+        const kind = layerKind(i.name);
+        return !SKIP_KINDS.has(kind) && !/salsa|aderezo/i.test(i.name);
+      })
+      .sort((a, b) => String(a.name).localeCompare(String(b.name), 'es'))
+    : [];
 
   const fixedHtml = fixed.length
     ? `<div class="ing-fixed">
@@ -214,7 +229,9 @@ export function burgerPickerHtml(p, choosable, esc, allIngredients = []) {
         <img class="dish-hero-img" src="${photo}" alt="" width="120" height="120" decoding="async" />
         <div class="dish-hero-copy">
           <strong>${esc(p.name)}</strong>
-          <span class="dish-hero-hint">Quite o añada ingredientes. Use el buscador en cada lista.</span>
+          <span class="dish-hero-hint">${allowAdd
+    ? 'Quite o añada ingredientes. Use el buscador en cada lista.'
+    : 'Revise los ingredientes incluidos y confirme el pedido.'}</span>
         </div>
       </div>
       ${fixedHtml}
