@@ -1,12 +1,12 @@
 /* JR Burger — service worker (caché de la interfaz; la API siempre va a la red) */
-const CACHE = 'jr-burger-v53';
+const CACHE = 'jr-burger-v54';
 const SHELL = [
   '/',
   '/index.html',
   '/css/fonts.css?v=56',
   '/css/app.css?v=56',
   '/js/api.js',
-  '/js/app.js?v=56',
+  '/js/app.js?v=63',
   '/js/burger-pick.js?v=56',
   '/favicon.svg',
   '/logo.png',

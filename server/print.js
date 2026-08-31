@@ -3,16 +3,56 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { getDb, getSetting } = require('./db');
 const { parseRemoved, parseAdded } = require('./inventory');
-
-function money(n) {
-  return '$ ' + Math.round(Number(n) || 0).toLocaleString('es-CO');
-}
+const { money } = require('./format');
+const { logoEscPos, ticketLogoHtml } = require('./escpos-logo');
 
 function pad(left, right, width) {
   const l = ascii(left);
   const r = ascii(right);
-  const space = Math.max(1, width - l.length - r.length);
-  return l + ' '.repeat(space) + r;
+  if (l.length + r.length >= width) {
+    return (l.slice(0, Math.max(0, width - r.length - 1)) + ' ' + r).slice(0, width);
+  }
+  return l + ' '.repeat(width - l.length - r.length) + r;
+}
+
+function pushPricedItem(lines, desc, price, cols) {
+  const priceStr = String(price);
+  const maxDesc = Math.max(8, cols - priceStr.length - 1);
+  const descLines = wrap(desc, maxDesc);
+  descLines.forEach((line, idx) => {
+    if (idx === descLines.length - 1) lines.push(pad(line, priceStr, cols));
+    else lines.push(line);
+  });
+}
+
+/** Avanza papel y corta — evita que el ticket quede cortado antes del final. */
+function escPosFeedAndCut(feedLines = 6) {
+  const n = Math.min(255, Math.max(3, feedLines));
+  return Buffer.from([0x1b, 0x64, n, 0x1d, 0x56, 0x00]);
+}
+
+function printPageStyle(widthMm) {
+  return `
+  @page { size: ${widthMm}mm auto; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 2mm; height: auto; overflow: visible; }
+  body { font-family: 'Courier New', monospace; font-size: 12px; width: ${widthMm}mm; color: #000; }
+  h1 { font-size: 12px; margin: 0 0 4px; text-align: center; }
+  .ticket-logo { text-align: center; margin: 0 0 6px; }
+  .ticket-logo img { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .c { text-align: center; }
+  .muted { font-size: 12px; }
+  hr { border: none; border-top: 1px dashed #000; margin: 6px 0; }
+  table { width: 100%; border-collapse: collapse; }
+  td { vertical-align: top; padding: 2px 0; word-break: break-word; }
+  .r { text-align: right; white-space: nowrap; }
+  .note { font-size: 11px; }
+  .total { font-weight: bold; font-size: 12px; }
+  pre { font-family: inherit; font-size: 12px; white-space: pre-wrap; margin: 0; word-break: break-word; }
+  @media print {
+    html, body { width: ${widthMm}mm; height: auto !important; overflow: visible !important; }
+    body { padding: 0; }
+  }`;
 }
 
 function removedLine(it) {
@@ -103,7 +143,7 @@ function ticketLines(payload) {
   push(`Cajero: ${inv.cashier_name}`);
   push('-'.repeat(cols));
   for (const it of items) {
-    push(pad(`${it.quantity}x ${it.product_name}`, money(it.quantity * it.unit_price), cols));
+    pushPricedItem(lines, `${it.quantity}x ${it.product_name}`, money(it.quantity * it.unit_price), cols);
     if (it.notes) wrap('  * ' + it.notes, cols).forEach(push);
     itemNotesLines(it).forEach((line) => wrap('  * ' + line, cols).forEach(push));
   }
@@ -127,18 +167,21 @@ function ticketLines(payload) {
 }
 
 function buildEscPos(payload) {
-  const { lines } = ticketLines(payload);
+  const { lines, widthMm } = ticketLines(payload);
   const chunks = [Buffer.from([0x1b, 0x40])];
+  const logo = logoEscPos(widthMm);
+  if (logo.length) chunks.push(logo);
   chunks.push(Buffer.from([0x1b, 0x61, 0x01]));
   let centered = true;
-  for (let i = 0; i < lines.length; i++) {
-    if (i === 4 && centered) {
+  for (const line of lines) {
+    if (centered && line.startsWith('-')) {
       chunks.push(Buffer.from([0x1b, 0x61, 0x00]));
       centered = false;
     }
-    chunks.push(Buffer.from(ascii(lines[i]) + '\n', 'latin1'));
+    chunks.push(Buffer.from(ascii(line) + '\n', 'latin1'));
   }
-  chunks.push(Buffer.from([0x1d, 0x56, 0x00]));
+  if (centered) chunks.push(Buffer.from([0x1b, 0x61, 0x00]));
+  chunks.push(escPosFeedAndCut(6));
   return Buffer.concat(chunks);
 }
 
@@ -164,24 +207,10 @@ function ticketHtml(payload) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>Ticket ${inv.number}</title>
-<style>
-  @page { size: ${widthMm}mm auto; margin: 2mm; }
-  * { box-sizing: border-box; }
-  body { font-family: 'Courier New', monospace; font-size: 12px; width: ${widthMm}mm; margin: 0 auto; color: #000; }
-  h1 { font-size: 12px; margin: 0 0 4px; text-align: center; }
-  .c { text-align: center; }
-  .muted { font-size: 12px; }
-  hr { border: none; border-top: 1px dashed #000; margin: 6px 0; }
-  table { width: 100%; border-collapse: collapse; }
-  td { vertical-align: top; padding: 2px 0; }
-  .r { text-align: right; white-space: nowrap; }
-  .note { font-size: 12px; }
-  .total { font-weight: bold; font-size: 12px; }
-  @media print { body { width: ${widthMm}mm; } }
-</style></head>
+<style>${printPageStyle(widthMm)}</style></head>
 <body>
-  <h1><img src="/logo.png" alt="" width="56" height="56" style="display:block;margin:0 auto 6px;object-fit:contain">
-  ${escapeHtml(name)}</h1>
+  ${ticketLogoHtml(widthMm)}
+  <h1>${escapeHtml(name)}</h1>
   <div class="c muted">${nit ? 'NIT ' + escapeHtml(nit) + '<br>' : ''}${escapeHtml(address)}${phone ? '<br>' + escapeHtml(phone) : ''}</div>
   <hr>
   <div>Ticket #${String(inv.number).padStart(5, '0')}</div>
@@ -239,9 +268,11 @@ function kitchenPayload(order, items, stationLabel, extraRound) {
 }
 
 function buildKitchenEscPos(payload) {
-  const { order, items, extraRound, stationLabel, cols, when } = payload;
+  const { order, items, extraRound, stationLabel, cols, when, widthMm } = payload;
   const dash = '-'.repeat(cols);
   const chunks = [Buffer.from([0x1b, 0x40])];
+  const logo = logoEscPos(widthMm);
+  if (logo.length) chunks.push(logo);
   chunks.push(Buffer.from([0x1b, 0x61, 0x01]));
   chunks.push(Buffer.from(ascii(getSetting('business_name', 'JR Burger')) + '\n', 'latin1'));
   chunks.push(Buffer.from([0x1b, 0x45, 0x01]));
@@ -271,8 +302,8 @@ function buildKitchenEscPos(payload) {
     });
     chunks.push(Buffer.from('\n'));
   }
-  chunks.push(Buffer.from(dash + '\n\n\n', 'latin1'));
-  chunks.push(Buffer.from([0x1d, 0x56, 0x00]));
+  chunks.push(Buffer.from(dash + '\n', 'latin1'));
+  chunks.push(escPosFeedAndCut(6));
   return Buffer.concat(chunks);
 }
 
@@ -286,18 +317,13 @@ function kitchenHtml(payload) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>${escapeHtml(stationLabel)} ${escapeHtml(order.table_name || '')}</title>
-<style>
-  @page { size: ${widthMm}mm auto; margin: 2mm; }
-  body { font-family: 'Courier New', monospace; font-size: 13px; width: ${widthMm}mm; margin: 0 auto; color: #000; }
-  h1 { font-size: 13px; margin: 0; text-align: center; }
+<style>${printPageStyle(widthMm)}
   h2 { font-size: 13px; margin: 6px 0 4px; text-align: center; font-weight: bold; }
-  .c { text-align: center; }
   .nuevo { font-weight: bold; text-align: center; margin: 4px 0; font-size: 13px; }
-  hr { border: none; border-top: 1px dashed #000; margin: 6px 0; }
   .item { font-size: 13px; font-weight: bold; margin: 8px 0; }
-  .note { font-size: 13px; font-weight: normal; }
 </style></head>
 <body>
+  ${ticketLogoHtml(widthMm)}
   <h1>${escapeHtml(name)}</h1>
   <div class="c">*** ${escapeHtml(stationLabel)} ***</div>
   <h2>${escapeHtml(order.table_name || 'Mesa')}</h2>
@@ -314,18 +340,74 @@ function kitchenHtml(payload) {
 
 function printRawWindows(buffer, printerName) {
   return new Promise((resolve) => {
+    const name = String(printerName || '').trim();
+    if (!name) {
+      resolve({ ok: false, error: 'Falta el nombre de la impresora en Ajustes' });
+      return;
+    }
+
     const tmp = path.join(__dirname, '..', 'data', `ticket-${Date.now()}-${Math.random().toString(16).slice(2)}.bin`);
-    fs.writeFileSync(tmp, buffer);
-    const dest = printerName.includes('\\') ? printerName : `\\\\localhost\\${printerName}`;
-    const child = spawn('cmd.exe', ['/c', 'copy', '/b', tmp, dest], { windowsHide: true });
+    try {
+      fs.mkdirSync(path.dirname(tmp), { recursive: true });
+      fs.writeFileSync(tmp, buffer);
+    } catch (e) {
+      resolve({ ok: false, error: e.message });
+      return;
+    }
+
+    const cleanup = () => { try { fs.unlinkSync(tmp); } catch (_) { /* ignore */ } };
+
+    const finish = (result) => {
+      cleanup();
+      if (!result.ok) console.error('[JR print]', name, result.error || 'fallo');
+      resolve(result);
+    };
+
+    const trySharedCopy = () => {
+      const dest = name.includes('\\') ? name : `\\\\localhost\\${name}`;
+      const child = spawn('cmd.exe', ['/c', 'copy', '/b', tmp, dest], { windowsHide: true });
+      let err = '';
+      child.stderr.on('data', (d) => { err += d.toString(); });
+      child.on('close', (code) => {
+        if (code === 0) finish({ ok: true });
+        else finish({ ok: false, error: err.trim() || 'No se pudo enviar a la impresora compartida' });
+      });
+      child.on('error', (e) => finish({ ok: false, error: e.message }));
+    };
+
+    if (process.platform !== 'win32') {
+      finish({ ok: false, error: 'Impresion directa solo disponible en Windows' });
+      return;
+    }
+
+    const psScript = path.resolve(__dirname, '..', 'scripts', 'raw-print.ps1');
+    if (!fs.existsSync(psScript)) {
+      finish({ ok: false, error: 'Falta scripts/raw-print.ps1 en la instalacion' });
+      return;
+    }
+
+    const child = spawn('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy', 'Bypass',
+      '-File', psScript,
+      '-PrinterName', name,
+      '-File', path.resolve(tmp)
+    ], { windowsHide: true });
+
     let err = '';
     child.stderr.on('data', (d) => { err += d.toString(); });
     child.on('close', (code) => {
-      try { fs.unlinkSync(tmp); } catch (_) { /* ignore */ }
-      if (code === 0) resolve({ ok: true });
-      else resolve({ ok: false, error: err || 'No se pudo enviar a la impresora' });
+      if (code === 0) finish({ ok: true });
+      else if (name.includes('\\')) trySharedCopy();
+      else {
+        const detail = err.trim().replace(/\r?\n/g, ' ');
+        finish({
+          ok: false,
+          error: detail || `Revise el nombre en Ajustes (Windows: "${name}")`
+        });
+      }
     });
-    child.on('error', (e) => resolve({ ok: false, error: e.message }));
+    child.on('error', (e) => finish({ ok: false, error: e.message }));
   });
 }
 
@@ -373,13 +455,53 @@ async function printTest() {
   const db = getDb();
   const last = db.prepare('SELECT id FROM invoices ORDER BY id DESC LIMIT 1').get();
   if (last) return printInvoice(last.id);
+
+  const enabled = getSetting('printer_enabled', '0') === '1';
+  const printerName = getSetting('printer_name', '').trim();
   const name = getSetting('business_name', 'JR Burger');
   const widthMm = Number(getSetting('printer_width', '80')) === 58 ? 58 : 80;
+  const when = new Date().toLocaleString('es-CO');
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
     @page { size: ${widthMm}mm auto; margin: 2mm; }
     body { font-family: 'Courier New', monospace; font-size: 13px; width: ${widthMm}mm; text-align:center; }
-  </style></head><body><h2>${escapeHtml(name)}</h2><p>Prueba de impresion</p><p>${new Date().toLocaleString('es-CO')}</p></body></html>`;
-  return { ok: true, mode: 'browser', html, message: 'Todavía no hay cuentas cobradas. Esta es una prueba de impresión.' };
+  </style></head><body>${ticketLogoHtml(widthMm)}<h2>${escapeHtml(name)}</h2><p>Prueba de impresion</p><p>${escapeHtml(when)}</p></body></html>`;
+
+  if (enabled && printerName) {
+    const cols = widthMm === 58 ? 32 : 48;
+    const lines = [
+      name,
+      '-'.repeat(cols),
+      'PRUEBA DE IMPRESION',
+      when,
+      '-'.repeat(cols),
+      'Si ve esto, la impresora',
+      'directa funciona bien.',
+      ''
+    ];
+    try {
+      const sent = await printRawWindows(buildLinesEscPos(lines), printerName);
+      if (sent.ok) {
+        return { ok: true, mode: 'usb', html, message: 'Recibo de prueba enviado a la impresora' };
+      }
+      return {
+        ok: false,
+        mode: 'browser',
+        html,
+        error: sent.error,
+        message: 'No se pudo imprimir directo. Se abre el ticket en el navegador.'
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        mode: 'browser',
+        html,
+        error: e.message,
+        message: 'No se pudo imprimir directo. Se abre el ticket en el navegador.'
+      };
+    }
+  }
+
+  return { ok: true, mode: 'browser', html, message: 'Prueba de impresion (modo navegador).' };
 }
 
 async function printKitchenOrder({ order, items, extraRound }) {
@@ -465,31 +587,30 @@ function htmlFromLines(title, lines) {
   const name = getSetting('business_name', 'JR Burger');
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
-<style>
-  @page { size: ${widthMm}mm auto; margin: 2mm; }
-  body { font-family: 'Courier New', monospace; font-size: 12px; width: ${widthMm}mm; margin: 0 auto; color: #000; }
-  h1 { font-size: 12px; margin: 0 0 4px; text-align: center; }
-  pre { font-family: inherit; font-size: 12px; white-space: pre-wrap; margin: 0; }
-</style></head>
+<style>${printPageStyle(widthMm)}</style></head>
 <body>
-  <h1><img src="/logo.png" alt="" width="56" height="56" style="display:block;margin:0 auto 6px;object-fit:contain">${escapeHtml(name)}</h1>
+  ${ticketLogoHtml(widthMm)}
+  <h1>${escapeHtml(name)}</h1>
   <pre>${escapeHtml(lines.join('\n'))}</pre>
 </body></html>`;
 }
 
 function buildLinesEscPos(lines) {
+  const { widthMm } = paperSize();
   const chunks = [Buffer.from([0x1b, 0x40])];
+  const logo = logoEscPos(widthMm);
+  if (logo.length) chunks.push(logo);
   chunks.push(Buffer.from([0x1b, 0x61, 0x01]));
   let centered = true;
-  for (let i = 0; i < lines.length; i++) {
-    if (i === 3 && centered) {
+  for (const line of lines) {
+    if (centered && line.startsWith('-')) {
       chunks.push(Buffer.from([0x1b, 0x61, 0x00]));
       centered = false;
     }
-    chunks.push(Buffer.from(ascii(lines[i]) + '\n', 'latin1'));
+    chunks.push(Buffer.from(ascii(line) + '\n', 'latin1'));
   }
-  chunks.push(Buffer.from('\n\n'));
-  chunks.push(Buffer.from([0x1d, 0x56, 0x00]));
+  if (centered) chunks.push(Buffer.from([0x1b, 0x61, 0x00]));
+  chunks.push(escPosFeedAndCut(6));
   return Buffer.concat(chunks);
 }
 

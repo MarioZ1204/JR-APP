@@ -22,7 +22,31 @@ export async function api(path, options = {}) {
   return data;
 }
 
-export const money = (n) => '$ ' + Math.round(Number(n) || 0).toLocaleString('es-CO');
+/** Formato colombiano: miles con punto ($ 1.234.567). */
+function formatNumber(n, decimals = 0) {
+  const v = Number(n) || 0;
+  const abs = Math.abs(v);
+  let intPart;
+  let decPart = '';
+  if (decimals > 0) {
+    const fixed = abs.toFixed(decimals);
+    const parts = fixed.split('.');
+    intPart = parts[0];
+    decPart = parts[1] || '';
+  } else {
+    intPart = String(Math.round(abs));
+  }
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  const body = decPart ? `${grouped},${decPart}` : grouped;
+  return v < 0 ? `-${body}` : body;
+}
+
+export const money = (n) => '$ ' + formatNumber(n);
+export const formatQty = (n) => {
+  const v = Number(n) || 0;
+  if (Math.abs(v - Math.round(v)) < 0.001) return formatNumber(v);
+  return formatNumber(v, 2);
+};
 
 export const ROLE = {
   admin: 'Jefe',
@@ -96,14 +120,19 @@ export const PAY = {
   daviplata: 'Daviplata'
 };
 
+function localDateStr(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 export function today() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateStr(new Date());
 }
 
 export function daysAgo(n) {
   const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  d.setDate(d.getDate() - Number(n) || 0);
+  return localDateStr(d);
 }
 
 export function navFor(role) {

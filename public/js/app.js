@@ -1,4 +1,4 @@
-import { api, money, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews, UNIT_KIND_LABELS, UNITS_BY_KIND, inferUnitKind, unitKindLabel } from './api.js';
+import { api, money, formatQty, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews, UNIT_KIND_LABELS, UNITS_BY_KIND, inferUnitKind, unitKindLabel } from './api.js';
 import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=56';
 import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=56';
 
@@ -33,10 +33,12 @@ const state = {
   transferFrom: null,
   floorEdit: false,
   socket: null,
+  socketWarned: false,
   live: false,
   infoName: 'Mi Restaurante',
   infoTagline: '',
   lanUrls: [],
+  serverDates: null,
   moreNav: false,
   ticketOpen: false,
   loading: false,
@@ -203,8 +205,17 @@ async function boot() {
     state.infoTagline = info.business_tagline || '';
     state.lanUrls = info.lan_urls || [];
     state.license = info.license || null;
+    state.serverDates = info.dates || null;
+    if (state.serverDates?.today) {
+      state.to = state.serverDates.today;
+      state.from = state.serverDates.week_from || daysAgo(7);
+    }
   } catch { /* login aún funciona */ }
   window.addEventListener('hashchange', () => loadView());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') ensureSocketLive();
+  });
+  window.addEventListener('focus', () => ensureSocketLive());
   document.addEventListener('fullscreenchange', () => {
     if (state.view === 'cocina') render();
   });
@@ -222,7 +233,7 @@ async function boot() {
     connectSocket();
     if (me.user.must_change_password) {
       go(homeFor(state.user.role));
-      await loadView();
+      render();
       showChangePasswordModal(true);
       return;
     }
@@ -238,10 +249,39 @@ async function boot() {
 function connectSocket() {
   const ioClient = window.io;
   if (!ioClient) return;
-  if (state.socket) state.socket.disconnect();
-  state.socket = ioClient({ transports: ['websocket', 'polling'] });
-  state.socket.on('connect', () => { state.live = true; paintLive(); });
-  state.socket.on('disconnect', () => { state.live = false; paintLive(); });
+  if (state.socket) {
+    state.socket.removeAllListeners();
+    state.socket.disconnect();
+  }
+  state.socket = ioClient({
+    path: '/socket.io',
+    transports: ['polling', 'websocket'],
+    withCredentials: true,
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 8000,
+    timeout: 20000
+  });
+  state.socket.on('connect', () => {
+    state.live = true;
+    state.socketWarned = false;
+    paintLive();
+  });
+  state.socket.on('disconnect', () => {
+    state.live = false;
+    paintLive();
+  });
+  state.socket.on('connect_error', (err) => {
+    state.live = false;
+    paintLive();
+    const msg = String(err?.message || '');
+    if (msg.includes('autenticado') || msg.includes('Authentication')) return;
+    if (!state.socketWarned) {
+      state.socketWarned = true;
+      toast('Tiempo real desconectado. Recargue si no se actualiza solo.', true);
+    }
+  });
   const refresh = () => {
     if (!state.user) return;
     if (!modalRoot.hidden) return;
@@ -254,12 +294,20 @@ function connectSocket() {
     if (state.kitchenSound) playKitchenChime();
     await fetchNavCounts();
     if (state.view === 'cocina') loadView(true);
+    else if (state.view === 'comanda' || state.view === 'mesas') loadView(true);
     else render();
     if (state.user?.role === 'kitchen') toast('Llegó un pedido nuevo');
   });
   state.socket.on('cash:changed', refresh);
   state.socket.on('inventory:changed', refresh);
   state.socket.on('menu:changed', refresh);
+}
+
+function ensureSocketLive() {
+  if (!state.user || !state.socket) return;
+  if (!state.live && !state.socket.connected) {
+    try { state.socket.connect(); } catch { /* ignore */ }
+  }
 }
 
 function paintLive() {
@@ -287,6 +335,11 @@ async function loadView(silent = false) {
   }
   try {
     if (view === 'login') { state.loading = false; render(); return; }
+    if (state.user?.must_change_password) {
+      state.loading = false;
+      render();
+      return;
+    }
     const navP = fetchNavCounts();
     if (view === 'panel') {
       state.dashboard = await api('/api/dashboard');
@@ -356,6 +409,10 @@ async function loadView(silent = false) {
     } else if (view === 'usuarios') {
       state.users = (await api('/api/users')).users;
     } else if (view === 'reportes') {
+      try {
+        const info = await api('/api/info');
+        if (info.dates) state.serverDates = info.dates;
+      } catch { /* fechas locales de respaldo */ }
       await loadReports();
     } else if (view === 'config') {
       const [s, b, t, info] = await Promise.all([api('/api/settings'), api('/api/backups'), api('/api/tables'), api('/api/info')]);
@@ -368,6 +425,10 @@ async function loadView(silent = false) {
   } catch (e) {
     if (e.status === 401) { state.user = null; state.loading = false; go('login'); return; }
     if (e.status === 403) {
+      if (e.data?.code === 'MUST_CHANGE') {
+        showChangePasswordModal(true);
+        return;
+      }
       toast('No tiene permiso para ver esto', true);
       go(homeFor(state.user.role));
       return;
@@ -499,6 +560,16 @@ function showMoreNav() {
 }
 
 function render() {
+  const focusSnap = (() => {
+    const el = document.activeElement;
+    if (!el || !root.contains(el)) return null;
+    return {
+      id: el.id || '',
+      selStart: el.selectionStart,
+      selEnd: el.selectionEnd
+    };
+  })();
+
   document.body.classList.toggle('kds-dark', state.view === 'cocina' && state.kitchenDark);
   if (!state.user || state.view === 'login') {
     state.moreNav = false;
@@ -558,6 +629,18 @@ function render() {
   bind();
   if (state.view === 'mesas' && state.tablesView === 'floor') bindFloorMap();
   bindDataPanels();
+
+  if (focusSnap?.id) {
+    const el = document.getElementById(focusSnap.id);
+    if (el) {
+      try {
+        el.focus({ preventScroll: true });
+        if (typeof el.setSelectionRange === 'function' && focusSnap.selStart != null) {
+          el.setSelectionRange(focusSnap.selStart, focusSnap.selEnd);
+        }
+      } catch { /* ignore */ }
+    }
+  }
 }
 
 function lanAccessCard() {
@@ -698,7 +781,7 @@ function deltaBadge(pct) {
 
 function panelView() {
   const d = state.dashboard || {};
-  const today = d.today || {};
+  const todayStats = d.today || {};
   const week = d.week || {};
   const tables = d.tables || {};
   const cash = d.cash || {};
@@ -713,7 +796,7 @@ function panelView() {
   <div class="dash">
     ${pageHead(
       `${greetingLine()}, ${name}`,
-      `${brand} · resumen de hoy ${esc(today.date || today())}`,
+      `${brand} · resumen de hoy ${esc(todayStats.date || today())}`,
       `<button type="button" class="btn ghost" data-act="nav" data-view="reportes">Ver informes</button>
        <button type="button" class="btn primary" data-act="nav" data-view="mesas">Ir a mesas</button>`
     )}
@@ -721,9 +804,9 @@ function panelView() {
     <div class="dash-kpis">
       <article class="dash-kpi primary">
         <span class="dash-kpi-label">Ventas de hoy</span>
-        <b class="dash-kpi-value">${money(today.total)}</b>
-        <div class="dash-kpi-meta">${today.tickets || 0} cuentas · ticket prom. ${money(today.avg_ticket)}</div>
-        ${deltaBadge(today.vs_yesterday_pct)}
+        <b class="dash-kpi-value">${money(todayStats.total)}</b>
+        <div class="dash-kpi-meta">${todayStats.tickets || 0} cuentas · ticket prom. ${money(todayStats.avg_ticket)}</div>
+        ${deltaBadge(todayStats.vs_yesterday_pct)}
       </article>
       <article class="dash-kpi">
         <span class="dash-kpi-label">Últimos 7 días</span>
@@ -804,7 +887,7 @@ function panelView() {
           </div>
           ${alerts.length
             ? `<ul class="dash-stock">${alerts.map((a) => `
-                <li><span>${esc(a.name)}</span><b>${Number(a.stock)} ${esc(a.unit || '')}</b></li>`).join('')}</ul>`
+                <li><span>${esc(a.name)}</span><b>${formatQty(a.stock)} ${esc(a.unit || '')}</b></li>`).join('')}</ul>`
             : '<p class="hint">Todo el stock está en rango.</p>'}
         </div>
       </aside>
@@ -924,6 +1007,10 @@ function tableCard(t) {
     </button>`;
 }
 
+function foldSearch(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 function catKey(name) {
   const n = String(name || '')
     .toLowerCase()
@@ -950,11 +1037,11 @@ function orderView() {
   const o = state.order;
   if (!o) return '<p>No se encontró el pedido</p>';
   const active = o.items.filter((i) => i.status !== 'cancelled');
-  const q = (state.posSearch || '').trim().toLowerCase();
+  const q = foldSearch(state.posSearch);
   const browsing = !q && (state.categoryId == null || state.categoryId === '');
   const cat = browsing ? null : state.categories.find((c) => String(c.id) === String(state.categoryId));
   const products = q
-    ? state.products.filter((p) => String(p.name || '').toLowerCase().includes(q))
+    ? state.products.filter((p) => foldSearch(p.name).includes(q))
     : (browsing ? [] : state.products.filter((p) => String(p.category_id) === String(state.categoryId)));
   const unsent = active.filter((i) => !i.sent).length;
   const billed = ['billed', 'cancelled'].includes(o.status);
@@ -997,12 +1084,14 @@ function orderView() {
     <div class="pos">
       <div class="pos-main">
         <header class="pos-bar">
-          <button type="button" class="pos-back" ${backAct} aria-label="Volver">←</button>
-          <div class="pos-bar-copy">
-            <h1>${title}</h1>
-            <p>${subtitle}</p>
+          <div class="pos-bar-top">
+            <button type="button" class="pos-back" ${backAct} aria-label="Volver">←</button>
+            <div class="pos-bar-copy">
+              <h1>${title}</h1>
+              <p>${subtitle}</p>
+            </div>
           </div>
-          ${!billed ? `<input id="pos-search" type="search" class="pos-search" placeholder="Buscar producto…" value="${esc(state.posSearch)}" autocomplete="off" />` : `<input type="search" class="pos-search" placeholder="Buscar…" disabled aria-hidden="true" tabindex="-1" />`}
+          ${!billed ? `<input id="pos-search" type="search" enterkeyhint="search" inputmode="search" class="pos-search" placeholder="Buscar producto…" value="${esc(state.posSearch)}" autocomplete="off" autocapitalize="off" spellcheck="false" />` : ''}
         </header>
         ${body}
       </div>
@@ -1336,8 +1425,8 @@ function inventoryView() {
       html: `<div class="card stock-card ${low ? 'low' : ''}" data-card>
           <div class="between"><b>${esc(i.name)}</b><span class="badge ${low ? 'occupied' : 'free'}">${low ? 'Poco' : 'Bien'}</span></div>
           <div class="stock-kind">${esc(kind)} · ${esc(i.unit)}</div>
-          <div class="stock-num">${i.stock} <small>${esc(i.unit)}</small></div>
-          <div class="small muted">Avisar cuando queden ${i.min_stock} ${esc(i.unit)}</div>
+          <div class="stock-num">${formatQty(i.stock)} <small>${esc(i.unit)}</small></div>
+          <div class="small muted">Avisar cuando queden ${formatQty(i.min_stock)} ${esc(i.unit)}</div>
           ${note}
           <div class="row stock-actions">
             <button class="btn" data-act="move-ing" data-id="${i.id}" data-type="purchase">Entrada</button>
@@ -1355,14 +1444,14 @@ function inventoryView() {
       <td>${esc(m.created_at)}</td>
       <td>${esc(m.ingredient_name)}</td>
       <td>${esc(MOVE_TYPE[m.type] || m.type)}</td>
-      <td>${m.quantity}</td>
-      <td>${m.stock_after}</td>
+      <td>${formatQty(m.quantity)}</td>
+      <td>${formatQty(m.stock_after)}</td>
       <td>${esc(m.reason || '')} <span class="small muted">${esc(m.user_name || '')}</span></td>
     </tr>`
   }));
   return `
     ${pageHead('Inventario', 'Defina cómo se controla cada insumo (piezas, peso, volumen o porción). Al vender, se descuenta solo.', `<button class="btn primary" data-act="new-ing">Agregar ingrediente</button>`)}
-    ${(state.alerts || []).length ? `<div class="alert warn">Se está acabando: ${state.alerts.map((a) => `${esc(a.name)} (${a.stock} ${esc(a.unit)})`).join(' · ')}</div>` : ''}
+    ${(state.alerts || []).length ? `<div class="alert warn">Se está acabando: ${state.alerts.map((a) => `${esc(a.name)} (${formatQty(a.stock)} ${esc(a.unit)})`).join(' · ')}</div>` : ''}
     ${dataPanel({
       id: 'inv-cards',
       mode: 'cards',
@@ -1533,11 +1622,24 @@ function productsChartHtml(products) {
               <div class="chart-hfill" style="width:${pct}%"></div>
               <span class="chart-hname">${esc(p.product_name || p.name)}</span>
             </div>
-            <span class="chart-hval">${p.qty}</span>
+            <span class="chart-hval">${formatQty(p.qty)}</span>
           </div>`;
         }).join('')}
       </div>
     </div>`;
+}
+
+function reportDatePreset(preset) {
+  const sd = state.serverDates;
+  const t = sd?.today || today();
+  const y = sd?.yesterday || daysAgo(1);
+  const w = sd?.week_from || daysAgo(7);
+  const m = sd?.month_from || daysAgo(30);
+  if (preset === 'today') return { from: t, to: t };
+  if (preset === 'yesterday') return { from: y, to: y };
+  if (preset === 'week') return { from: w, to: t };
+  if (preset === 'month') return { from: m, to: t };
+  return null;
 }
 
 function reportsView() {
@@ -1577,7 +1679,7 @@ function reportsView() {
       head: '<tr><th>Producto</th><th>Cuántos</th><th>Total</th></tr>',
       rows: (r.products || []).map((p) => ({
         search: p.product_name || p.name || '',
-        html: `<tr><td>${esc(p.product_name || p.name)}</td><td>${p.qty}</td><td>${money(p.total)}</td></tr>`
+        html: `<tr><td>${esc(p.product_name || p.name)}</td><td>${formatQty(p.qty)}</td><td>${money(p.total)}</td></tr>`
       })),
       empty: 'Sin datos'
     })}`;
@@ -1669,12 +1771,14 @@ function configView() {
         <select name="printer_width">
           <option value="80" ${Number(s.printer_width) !== 58 ? 'selected' : ''}>80 mm</option>
           <option value="58" ${Number(s.printer_width) === 58 ? 'selected' : ''}>58 mm</option>
-        </select></div>
+        </select>
+        <p class="hint">Si el ticket se corta o sale incompleto, pruebe 58 mm (SAT38TUSE suele ser 58 mm).</p></div>
       <div class="field"><label>¿Cómo se imprime?</label>
         <select name="printer_enabled"><option value="0" ${s.printer_enabled ? '' : 'selected'}>Desde el computador (elige la impresora)</option>
         <option value="1" ${s.printer_enabled ? 'selected' : ''}>Directo a la impresora del restaurante</option></select></div>
       <div class="field"><label>Nombre de la impresora (como sale en Windows)</label>
-        <input name="printer_name" value="${esc(s.printer_name || '')}" placeholder="POS-80" /></div>
+        <input name="printer_name" value="${esc(s.printer_name || '')}" placeholder="SAT38TUSE" />
+        <p class="hint">Configuración → Impresoras: use el nombre exacto (ej. SAT38TUSE). No hace falta compartirla.</p></div>
       <div class="field"><label>Si se acaba un ingrediente</label>
         <select name="block_on_no_stock">
           <option value="0" ${s.block_on_no_stock ? '' : 'selected'}>Avisar y dejar vender</option>
@@ -1809,11 +1913,11 @@ async function onClick(e) {
       return;
     }
     if (act === 'date-preset') {
-      const p = el.dataset.preset;
-      if (p === 'today') { state.from = today(); state.to = today(); }
-      else if (p === 'yesterday') { state.from = daysAgo(1); state.to = daysAgo(1); }
-      else if (p === 'week') { state.from = daysAgo(7); state.to = today(); }
-      else if (p === 'month') { state.from = daysAgo(30); state.to = today(); }
+      const range = reportDatePreset(el.dataset.preset);
+      if (range) {
+        state.from = range.from;
+        state.to = range.to;
+      }
       await loadReports();
       render();
       return;
@@ -1958,8 +2062,12 @@ async function onSubmit(e) {
       state.setup = me.setup || null;
       try { connectSocket(); } catch { /* el acceso no depende del socket */ }
       go(homeFor(r.user.role));
+      if (r.user.must_change_password || r.must_change_password) {
+        render();
+        showChangePasswordModal(true);
+        return;
+      }
       await loadView();
-      if (r.user.must_change_password || r.must_change_password) showChangePasswordModal(true);
       return;
     }
     if (act === 'change-password') {
@@ -2114,7 +2222,13 @@ async function onSubmit(e) {
 async function onInput(e) {
   if (e.target.id === 'pos-search') {
     state.posSearch = e.target.value;
-    if (state.view === 'comanda') render();
+    if (state.view === 'comanda') {
+      if (state._posSearchFrame) cancelAnimationFrame(state._posSearchFrame);
+      state._posSearchFrame = requestAnimationFrame(() => {
+        state._posSearchFrame = 0;
+        render();
+      });
+    }
   }
 }
 
@@ -2445,11 +2559,37 @@ function openTicket(print) {
   else if (print.message) toast(print.message);
   if (print.ok && print.mode === 'usb') return;
   if (!print.html) return;
-  const w = window.open('', 'ticket', 'width=420,height=640');
+  const w = window.open('', 'ticket', 'width=420,height=720');
   if (!w) { toast('Deje abrir la ventana para imprimir el ticket', true); return; }
   w.document.write(print.html);
   w.document.close();
-  setTimeout(() => { try { w.focus(); w.print(); } catch { /* impresora ausente no bloquea */ } }, 250);
+  const doPrint = () => {
+    try {
+      w.focus();
+      w.print();
+    } catch { /* impresora ausente no bloquea */ }
+  };
+  const waitReady = () => {
+    const imgs = [...w.document.images];
+    if (!imgs.length) {
+      setTimeout(doPrint, 200);
+      return;
+    }
+    let pending = imgs.length;
+    const done = () => {
+      pending -= 1;
+      if (pending <= 0) setTimeout(doPrint, 200);
+    };
+    imgs.forEach((img) => {
+      if (img.complete) done();
+      else {
+        img.onload = done;
+        img.onerror = done;
+      }
+    });
+  };
+  if (w.document.readyState === 'complete') waitReady();
+  else w.addEventListener('load', waitReady);
 }
 
 function refreshIngUnitOptions(kind, currentUnit) {
@@ -2891,7 +3031,13 @@ function bindDataPanels() {
   root.querySelectorAll('.data-panel[data-payload]').forEach((panel) => {
     let cfg;
     try { cfg = JSON.parse(decodeURIComponent(panel.dataset.payload)); } catch { return; }
-    const statePanel = { q: '', page: 0, ...cfg };
+    const panelId = panel.dataset.panel || '';
+    if (!state.dataSearch) state.dataSearch = {};
+    const statePanel = {
+      q: state.dataSearch[panelId] || '',
+      page: 0,
+      ...cfg
+    };
     const search = panel.querySelector('.data-search');
     const meta = panel.querySelector('.data-meta');
     const pageLabel = panel.querySelector('.data-page');
@@ -2899,9 +3045,16 @@ function bindDataPanels() {
     const cards = panel.querySelector('.data-cards');
     const prev = panel.querySelector('[data-dir="-1"]');
     const next = panel.querySelector('[data-dir="1"]');
+    if (search) {
+      search.value = statePanel.q;
+      search.setAttribute('enterkeyhint', 'search');
+      search.setAttribute('inputmode', 'search');
+      search.setAttribute('autocapitalize', 'off');
+      search.setAttribute('spellcheck', 'false');
+    }
 
     function fold(s) {
-      return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      return foldSearch(s);
     }
 
     function paint() {
@@ -2926,7 +3079,12 @@ function bindDataPanels() {
       next.disabled = statePanel.page >= pages - 1;
     }
 
-    search.oninput = () => { statePanel.q = search.value; statePanel.page = 0; paint(); };
+    search.oninput = () => {
+      statePanel.q = search.value;
+      state.dataSearch[panelId] = search.value;
+      statePanel.page = 0;
+      paint();
+    };
     prev.onclick = () => { statePanel.page -= 1; paint(); };
     next.onclick = () => { statePanel.page += 1; paint(); };
     paint();

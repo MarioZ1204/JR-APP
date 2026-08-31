@@ -25,7 +25,10 @@ autoBackup();
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: true, credentials: true }
+  cors: { origin: true, credentials: true },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  connectTimeout: 45000
 });
 
 const sessionMiddleware = session({
@@ -65,7 +68,16 @@ app.use((err, req, res, next) => {
   res.status(status).send('Error');
 });
 
-const wrap = (middleware) => (socket, next) => middleware(socket.request, {}, next);
+const wrap = (middleware) => (socket, next) => {
+  const res = {
+    end: () => {},
+    writeHead: () => {},
+    getHeader: () => undefined,
+    setHeader: () => {},
+    write: () => {}
+  };
+  middleware(socket.request, res, next);
+};
 io.use(wrap(sessionMiddleware));
 io.use((socket, next) => {
   const user = socket.request.session && socket.request.session.user;
@@ -76,6 +88,10 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   socket.join('staff');
   socket.emit('hello', { user: socket.user });
+  console.log('[socket] conectado:', socket.user.username, '@', socket.handshake.address);
+});
+io.engine.on('connection_error', (err) => {
+  console.warn('[socket] error de enlace:', err.message || err);
 });
 
 const PORT = Number(process.env.PORT || 3000);

@@ -42,12 +42,19 @@ function mountApi(app) {
 
   app.get('/api/info', (_req, res) => {
     const s = getAllSettings();
+    const dayRow = getDb().prepare(`
+      SELECT date('now','localtime') AS today,
+             date('now','localtime','-1 day') AS yesterday,
+             date('now','localtime','-7 day') AS week_from,
+             date('now','localtime','-30 day') AS month_from
+    `).get();
     res.json({
       business_name: getSetting('business_name', 'Mi Restaurante'),
       business_tagline: getSetting('business_tagline', ''),
       lan_urls: lanUrls(Number(process.env.PORT || 3000)),
       license: publicLicense(),
-      app_version: APP_VERSION
+      app_version: APP_VERSION,
+      dates: dayRow
     });
   });
 
