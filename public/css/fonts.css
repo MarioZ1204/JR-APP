@@ -1,35 +1,36 @@
+/* Fuentes locales en WOFF2. Se regeneran con scripts/optimizar-fuentes.py */
 @font-face {
   font-family: 'Outfit';
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url('/fonts/outfit-400.ttf') format('truetype');
+  src: url('/fonts/outfit-400.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Outfit';
   font-style: normal;
   font-weight: 500;
   font-display: swap;
-  src: url('/fonts/outfit-500.ttf') format('truetype');
+  src: url('/fonts/outfit-500.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Outfit';
   font-style: normal;
   font-weight: 600;
   font-display: swap;
-  src: url('/fonts/outfit-600.ttf') format('truetype');
+  src: url('/fonts/outfit-600.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Outfit';
   font-style: normal;
   font-weight: 700;
   font-display: swap;
-  src: url('/fonts/outfit-700.ttf') format('truetype');
+  src: url('/fonts/outfit-700.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Alfa Slab One';
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url('/fonts/alfa-slab-one.ttf') format('truetype');
+  src: url('/fonts/alfa-slab-one.woff2') format('woff2');
 }

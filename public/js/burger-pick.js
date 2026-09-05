@@ -113,21 +113,21 @@ const SHAPE_PHOTO = {
 function ingSrc(kind) {
   const k = kind || 'extra';
   if (k === 'hotdog-bun') {
-    const path = '/icons/cats/perro.png?v=54';
+    const path = '/icons/cats/perro.webp?v=64';
     return { path, fallback: path };
   }
   return {
-    path: `/icons/ings/${k}.png?v=54`,
-    fallback: `/icons/ings/extra.png?v=54`
+    path: `/icons/ings/${k}.webp?v=64`,
+    fallback: `/icons/ings/extra.webp?v=64`
   };
 }
 
 function dishPhoto(shape, p) {
   const cat = fold(p?.category_name || '');
-  if (/bebida/.test(cat)) return '/icons/cats/bebida.png?v=54';
-  if (/adicional/.test(cat)) return '/icons/cats/adicional.png?v=54';
+  if (/bebida/.test(cat)) return '/icons/cats/bebida.webp?v=64';
+  if (/adicional/.test(cat)) return '/icons/cats/adicional.webp?v=64';
   const key = SHAPE_PHOTO[shape] || 'especial';
-  return `/icons/cats/${key}.png?v=54`;
+  return `/icons/cats/${key}.webp?v=64`;
 }
 
 const SKIP_KINDS = new Set(['ketchup', 'mustard', 'mayo', 'ranch', 'bbq', 'cream', 'sauce', 'honey', 'garlic']);

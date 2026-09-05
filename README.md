@@ -57,6 +57,7 @@ npm start
 - [Uso por rol](docs/USO.md)
 - [Impresora térmica USB](docs/IMPRESORA.md)
 - [Base de datos](docs/BASE_DE_DATOS.md)
+- [Imágenes y fuentes](docs/IMAGENES.md) — cómo agregar iconos de ingredientes
 
 ## Firewall
 

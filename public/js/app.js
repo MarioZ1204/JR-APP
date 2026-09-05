@@ -1,6 +1,6 @@
 import { api, money, formatQty, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews, UNIT_KIND_LABELS, UNITS_BY_KIND, inferUnitKind, unitKindLabel } from './api.js';
-import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=56';
-import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=56';
+import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=64';
+import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=64';
 
 const root = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
@@ -601,7 +601,7 @@ function render() {
       <nav class="sidenav">
         <div class="sidenav-brand">
           <div class="logo-plate">
-            <img src="/logo.png" alt="JR Burger" />
+            <img src="/logo.webp?v=64" alt="JR Burger" />
           </div>
           <b>${brand}</b>
           ${tagline ? `<span>${tagline}</span>` : ''}
@@ -614,7 +614,7 @@ function render() {
       </nav>
       <header class="topbar">
         <div class="brand">
-          <div class="logo-plate sm"><img src="/logo.png" alt="${brand}" /></div>
+          <div class="logo-plate sm"><img src="/logo.webp?v=64" alt="${brand}" /></div>
           <div class="brand-copy"><b>${brand}</b>${tagline ? `<small>${tagline}</small>` : ''}</div>
         </div>
         <div class="grow"></div>
@@ -679,7 +679,7 @@ function loginView() {
   return `
   <div class="login">
     <div class="login-card card">
-      <img class="login-logo" src="/logo.png" alt="${brand}" />
+      <img class="login-logo" src="/logo.webp?v=64" alt="${brand}" />
       <h1>${brand}</h1>
       ${tag ? `<p class="lede">${tag}</p>` : ''}
       <p class="login-sub">Mesas, cocina, caja e informes en un solo lugar</p>
@@ -909,6 +909,35 @@ function legendChip(key, label, count, pipClass = key) {
   </button>`;
 }
 
+/* Aviso de insumos por agotarse.
+   Antes se imprimían los nombres de todos, y con 30 insumos bajos quedaba un
+   párrafo ilegible que ocupaba media pantalla. Ahora manda la cifra y solo se
+   nombran los tres más críticos. */
+function stockAlert({ conCantidad = false } = {}) {
+  const bajos = state.alerts || [];
+  if (!bajos.length) return '';
+
+  const muestra = bajos.slice(0, 3);
+  const nombres = muestra
+    .map((a) => conCantidad
+      ? `${esc(a.name)} <b>${formatQty(a.stock)} ${esc(a.unit)}</b>`
+      : esc(a.name))
+    .join(' · ');
+  const resto = bajos.length - muestra.length;
+  const irAInventario = state.user?.role === 'admin' && state.view !== 'inventario'
+    ? `<button type="button" class="btn sm" data-act="nav" data-view="inventario">Ver inventario</button>`
+    : '';
+
+  return `
+    <div class="alert warn stock-alert">
+      <div class="stock-alert-copy">
+        <b>${bajos.length} ${bajos.length === 1 ? 'insumo' : 'insumos'} por agotarse</b>
+        <span>${nombres}${resto > 0 ? ` · y ${resto} más` : ''}</span>
+      </div>
+      ${irAInventario}
+    </div>`;
+}
+
 function mesasView() {
   const picking = !!(state.joinFrom || state.transferFrom);
   if (picking) state.floorEdit = false;
@@ -941,7 +970,7 @@ function mesasView() {
     </div>`;
   return `
     ${pageHead('Mesas', mode, `${viewToggle}${editBtn}`)}
-    ${(state.alerts || []).length ? `<div class="alert warn">Se está acabando: ${state.alerts.map((a) => esc(a.name)).join(', ')}</div>` : ''}
+    ${stockAlert()}
     ${filterBar}
     ${sorted.length === 0 && state.tablesFilter !== 'all'
       ? `<div class="empty card">No hay mesas con ese filtro. <button type="button" class="btn ghost sm" data-act="tables-filter" data-filter="all">Ver todas</button></div>`
@@ -1030,7 +1059,7 @@ function catKey(name) {
 
 function catIcon(name) {
   const key = catKey(name);
-  return `<img class="cat-ico cat-ico-${key}" src="/icons/cats/${key}.png?v=34" alt="" width="64" height="64" decoding="async" draggable="false" />`;
+  return `<img class="cat-ico cat-ico-${key}" src="/icons/cats/${key}.webp?v=64" alt="" width="64" height="64" decoding="async" draggable="false" />`;
 }
 
 function orderView() {
@@ -1451,7 +1480,7 @@ function inventoryView() {
   }));
   return `
     ${pageHead('Inventario', 'Defina cómo se controla cada insumo (piezas, peso, volumen o porción). Al vender, se descuenta solo.', `<button class="btn primary" data-act="new-ing">Agregar ingrediente</button>`)}
-    ${(state.alerts || []).length ? `<div class="alert warn">Se está acabando: ${state.alerts.map((a) => `${esc(a.name)} (${formatQty(a.stock)} ${esc(a.unit)})`).join(' · ')}</div>` : ''}
+    ${stockAlert({ conCantidad: true })}
     ${dataPanel({
       id: 'inv-cards',
       mode: 'cards',
@@ -2113,7 +2142,11 @@ async function onSubmit(e) {
         state.billTip = 0;
         toast('Cuenta #' + r.invoice.number + ' cobrada');
         if (r.change > 0) toast('Vuelto: ' + money(r.change));
-        if (r.alerts?.length) toast('Se está acabando: ' + r.alerts.map((a) => a.name).join(', '));
+        if (r.alerts?.length) {
+          const nombres = r.alerts.slice(0, 2).map((a) => a.name).join(', ');
+          const resto = r.alerts.length - Math.min(2, r.alerts.length);
+          toast(`Por agotarse: ${nombres}${resto > 0 ? ` y ${resto} más` : ''}`);
+        }
         openTicket(r.print);
         go('facturar');
       });

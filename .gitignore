@@ -8,6 +8,7 @@ data/rental.lock
 producto.key
 product.key
 backups/
+capturas*/
 *.log
 .DS_Store
 Thumbs.db

@@ -49,13 +49,27 @@ app.use((req, _res, next) => {
   req.io = io;
   next();
 });
-app.use(express.static(path.join(__dirname, '..', 'public')));
+const PUBLICO = path.join(__dirname, '..', 'public');
+
+// Los iconos y fuentes se piden con ?v=N, así que se pueden guardar mucho tiempo:
+// al cambiar la versión el navegador pide una URL distinta. El HTML y el service
+// worker se revalidan siempre, para que una actualización llegue de inmediato.
+app.use(express.static(PUBLICO, {
+  maxAge: '30d',
+  setHeaders(res, ruta) {
+    const nombre = path.basename(ruta);
+    if (nombre === 'index.html' || nombre === 'sw.js' || nombre === 'manifest.webmanifest') {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  }
+}));
 
 mountApi(app);
 
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next();
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(PUBLICO, 'index.html'));
 });
 
 app.use((err, req, res, next) => {

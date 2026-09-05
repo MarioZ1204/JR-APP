@@ -5,14 +5,16 @@
   --card: #fffcf8;
   --ink: #1a1512;
   --muted: #6b6358;
-  --faint: #8f8578;
+  /* --faint y --wait se oscurecieron un punto para llegar a 4.5:1 de contraste
+     sobre crema y tarjeta; antes se leían mal en pantallas con brillo alto. */
+  --faint: #797165;
   --line: #e8ddd0;
   --brick: #c0392b;
   --brick-deep: #962d22;
   --brick-glow: rgba(192, 57, 43, .22);
   --free: #1a7a4a;
   --busy: #c0392b;
-  --wait: #b86e0f;
+  --wait: #a3610d;
   --hold: #2a6482;
   --ok: #1a7a4a;
   --danger: #962d22;
@@ -37,6 +39,12 @@
 }
 
 * { box-sizing: border-box; }
+
+/* El navegador oculta [hidden] con `display: none`, pero cualquier regla propia
+   que declare `display` le gana. Por eso el botón "Cancelar" de Mesas se veía
+   siempre: hereda `display: inline-flex` de .btn. Con esto, `hidden` vuelve a
+   funcionar en todo el sistema sin tener que parchear cada componente. */
+[hidden] { display: none !important; }
 html, body { margin: 0; min-height: 100%; background: var(--cream); color: var(--ink); font-family: var(--font); font-variant-numeric: tabular-nums lining-nums; }
 html { -webkit-text-size-adjust: 100%; overflow-x: clip; }
 body {
@@ -58,11 +66,14 @@ img { max-width: 100%; height: auto; }
 
 .app-shell {
   min-height: 100dvh;
+  /* patron.webp es una textura de garabatos repetible. Antes aquí iba el banner
+     del negocio completo, que colaba el nombre en letras gigantes detrás de las
+     tarjetas y parecía una marca de agua puesta por error. */
   background:
     radial-gradient(900px 420px at 88% -8%, rgba(192, 57, 43, .06), transparent 55%),
     radial-gradient(700px 380px at 8% 0%, rgba(196, 122, 42, .05), transparent 50%),
     linear-gradient(180deg, rgba(246, 240, 230, .97), rgba(246, 240, 230, .92)),
-    url('/BCKGROUND.jpeg') center / 680px repeat;
+    url('/patron.webp') center / 300px repeat;
 }
 
 .topbar {
@@ -297,8 +308,16 @@ img { max-width: 100%; height: auto; }
 .table-card .name { font-family: var(--font); font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
 .table-card .meta { color: var(--muted); font-size: 13px; margin-top: 8px; line-height: 1.35; }
 .table-card .amount { font-weight: 700; margin-top: 12px; font-size: 18px; color: var(--ink); }
-.table-card .between { align-items: flex-start; }
-.table-card .badge { flex-shrink: 0; max-width: 55%; white-space: normal; text-align: right; }
+/* El nombre de la mesa es lo que se busca de un vistazo, así que se queda con
+   la línea completa y la etiqueta de estado baja debajo. Compartiendo fila, en
+   las tarjetas angostas (156 px) "Mesa 1" se partía en dos renglones. */
+.table-card .between {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+}
+.table-card .name { overflow-wrap: normal; }
+.table-card .badge { flex-shrink: 0; max-width: 100%; white-space: normal; text-align: left; }
 .table-card.joined { opacity: .72; }
 .tables-grid.pick-mode .table-card {
   box-shadow: 0 0 0 2px rgba(192, 57, 43, .28);
@@ -394,10 +413,12 @@ img { max-width: 100%; height: auto; }
 .login {
   min-height: 100dvh; display: grid; place-items: center;
   padding: calc(20px + var(--safe-t)) 20px calc(20px + var(--safe-b));
+  /* La textura se repite en vez de estirarse: al usar `cover` el banner original
+     se ampliaba y las letras gigantes quedaban como manchas tras la tarjeta. */
   background:
-    radial-gradient(ellipse 80% 50% at 50% 0%, rgba(192, 57, 43, .18), transparent 55%),
-    linear-gradient(180deg, rgba(26, 22, 20, .72) 0%, rgba(26, 22, 20, .35) 45%, rgba(26, 22, 20, .82) 100%),
-    url('/BCKGROUND.jpeg') center / cover no-repeat #c8c0b4;
+    radial-gradient(ellipse 80% 55% at 50% 0%, rgba(192, 57, 43, .26), transparent 60%),
+    linear-gradient(180deg, rgba(22, 18, 15, .82) 0%, rgba(30, 25, 21, .62) 45%, rgba(16, 13, 11, .9) 100%),
+    url('/patron.webp') center / 300px repeat #322a24;
 }
 .login-card {
   width: min(420px, 100%);
@@ -1955,3 +1976,98 @@ body.kds-dark .kds-time { color: #f0c14b; }
   .modal-root .sheet::before { display: none; }
   .modal-root .sheet { padding-top: 22px; }
 }
+
+/* Aviso de insumos por agotarse: la cifra manda y los nombres acompañan. */
+.stock-alert { align-items: center; gap: 12px; }
+.stock-alert-copy {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.stock-alert-copy b { font-size: 14px; font-weight: 700; }
+.stock-alert-copy span {
+  font-size: 13px; font-weight: 500; line-height: 1.4;
+  color: #8a5a10; opacity: .85;
+}
+.stock-alert .btn { flex-shrink: 0; }
+@media (max-width: 560px) {
+  .stock-alert { flex-wrap: wrap; }
+  .stock-alert .btn { width: 100%; }
+}
+
+/* ——————————————————————————————————————————————————————————
+   Comportamiento en tablet y celular
+   El sistema se usa de pie, con una mano y con prisa. Estas reglas evitan
+   los gestos del navegador que interrumpen una comanda a medio armar.
+   —————————————————————————————————————————————————————————— */
+
+html {
+  /* Corta el "tirar para recargar" de Android: recargar en mitad de una comanda
+     borraba lo que el mesero llevaba escrito. */
+  overscroll-behavior-y: contain;
+  /* Los controles de formulario se mantienen claros aunque el sistema
+     operativo del dispositivo esté en modo oscuro. */
+  color-scheme: light;
+}
+
+/* Casillas y radios en el color de la marca en vez del azul del sistema. */
+:root { accent-color: var(--brick); }
+
+/* Al mantener pulsado un botón, Android ofrecía "copiar/seleccionar" encima de
+   la interfaz. Se desactiva en los controles, no en el contenido legible. */
+.btn, .icon-btn, .chip, .badge, .legend span, .legend-chip,
+.tabs button, .bottom-nav button, .sidenav-links button, .more-nav-grid button,
+.table-card, .floor-table, .prod, .ing-chip, .pos-group, .pos-item,
+.pay-tile, .kds-actions .btn, .topbar, .brand-copy {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Lo que sí se debe poder copiar: direcciones de red, claves y totales. */
+.lan-url, .ticket, .license-key, table.data, .dash-table {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ——— Tipografía ———
+   Evita que un título o una descripción quede con una sola palabra colgando
+   en la última línea, que es lo que más delata una interfaz sin terminar. */
+.page h1, .modal-title, .kds-card h2, .pos-group-name, .login h1 {
+  text-wrap: balance;
+}
+.lede, .hint, .dash-kpi-meta { text-wrap: pretty; }
+
+::placeholder { color: var(--faint); opacity: 1; }
+
+/* ——— Campos numéricos ———
+   Las flechitas del navegador son diminutas para un dedo y desalinean el campo.
+   Las cantidades y los pagos se escriben con teclado numérico. */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ——— Respuesta al toque ———
+   Sin :hover en táctil, el único aviso de que el toque se registró es el
+   hundido. Se aplica a todo lo pulsable para que la sensación sea la misma. */
+@media (hover: none) {
+  .btn:active, .icon-btn:active, .table-card:active, .floor-table:active,
+  .prod:active, .ing-chip:active, .pos-item:active, .pay-tile:active,
+  .legend-chip:active, .tabs button:active {
+    transform: scale(.975);
+  }
+}
+
+/* ——— Barras de desplazamiento ———
+   La barra gris del sistema corta el fondo crema en las tablas y el menú. */
+* { scrollbar-width: thin; scrollbar-color: #cdc0b0 transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #cdc0b0;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #b8a893; background-clip: content-box; }

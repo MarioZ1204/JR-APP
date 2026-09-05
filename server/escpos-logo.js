@@ -2,7 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
+// Este módulo decodifica PNG a mano, así que el logo del ticket tiene que ser
+// PNG. Los candidatos se generan con scripts/optimizar-assets.py.
 const LOGO_CANDIDATES = [
+  path.join(__dirname, '..', 'public', 'logo-print.png'),
+  path.join(__dirname, '..', 'public', 'icon-512.png'),
   path.join(__dirname, '..', 'public', 'logo-256.png'),
   path.join(__dirname, '..', 'public', 'logo.png')
 ];
