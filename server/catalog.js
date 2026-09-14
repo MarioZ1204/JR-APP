@@ -246,7 +246,32 @@ function ensureIng(db, name, unit, stock, min) {
     .run(name, unit, inferUnitKind(unit), stock, min).lastInsertRowid;
 }
 
+function purgeLegacyDemoMenu(db) {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'jr_purge_demo_cats_v1'").get();
+  if (done) return;
+
+  for (const name of HIDE) {
+    const rows = db.prepare('SELECT id FROM products WHERE name = ?').all(name);
+    for (const p of rows) {
+      db.prepare('DELETE FROM recipes WHERE product_id = ?').run(p.id);
+      try {
+        db.prepare('DELETE FROM products WHERE id = ?').run(p.id);
+      } catch {
+        db.prepare('UPDATE products SET active = 0, category_id = NULL WHERE id = ?').run(p.id);
+      }
+    }
+  }
+
+  for (const name of ['Platos fuertes', 'Acompañamientos', 'Postres']) {
+    db.prepare('DELETE FROM categories WHERE name = ?').run(name);
+  }
+
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('jr_purge_demo_cats_v1', '1')").run();
+}
+
 function seedCatalog(db) {
+  purgeLegacyDemoMenu(db);
+
   const done = db.prepare("SELECT value FROM settings WHERE key = 'jr_menu_v1'").get();
   if (!done) {
 

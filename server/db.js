@@ -387,7 +387,6 @@ function seedIfEmpty() {
   insertUser.run('Mesero', 'mesero', hash('mesero123'), 'waiter');
   insertUser.run('Cocina', 'cocina', hash('cocina123'), 'kitchen');
   insertUser.run('Cajero', 'cajero', hash('cajero123'), 'cashier');
-  const adminId = db.prepare("SELECT id FROM users WHERE username = 'admin'").get().id;
 
   const insertTable = db.prepare(
     'INSERT INTO restaurant_tables (name, seats, sort_order, pos_x, pos_y) VALUES (?, ?, ?, ?, ?)'
@@ -395,61 +394,11 @@ function seedIfEmpty() {
   insertTable.run('Mesa 1', 4, 1, 25, 35);
   insertTable.run('Mesa 2', 4, 2, 55, 35);
 
-  const insertCat = db.prepare(
-    'INSERT INTO categories (name, sort_order, station) VALUES (?, ?, ?)'
-  );
-  const catPlatos = insertCat.run('Platos fuertes', 1, 'kitchen').lastInsertRowid;
-  const catAcomp = insertCat.run('Acompañamientos', 2, 'kitchen').lastInsertRowid;
-  const catBebidas = insertCat.run('Bebidas', 3, 'bar').lastInsertRowid;
-  const catPostres = insertCat.run('Postres', 4, 'kitchen').lastInsertRowid;
-
-  const insertProd = db.prepare(
-    'INSERT INTO products (category_id, name, price, station) VALUES (?, ?, ?, ?)'
-  );
-  const burger = insertProd.run(catPlatos, 'Hamburguesa clásica', 18000, 'kitchen').lastInsertRowid;
-  const papas = insertProd.run(catAcomp, 'Papas fritas', 8000, 'kitchen').lastInsertRowid;
-  insertProd.run(catBebidas, 'Gaseosa 350ml', 4000, 'bar');
-  insertProd.run(catBebidas, 'Jugo natural', 6000, 'bar');
-  insertProd.run(catBebidas, 'Café', 3000, 'bar');
-  insertProd.run(catPostres, 'Brownie', 7000, 'kitchen');
-
-  const insertIng = db.prepare(
-    'INSERT INTO ingredients (name, unit, unit_kind, stock, min_stock) VALUES (?, ?, ?, ?, ?)'
-  );
-  const pan = insertIng.run('Pan de hamburguesa', 'unidad', 'count', 40, 10).lastInsertRowid;
-  const carne = insertIng.run('Carne molida', 'g', 'weight', 5000, 800).lastInsertRowid;
-  const lechuga = insertIng.run('Lechuga', 'hoja', 'count', 80, 20).lastInsertRowid;
-  const tomate = insertIng.run('Tomate', 'rodaja', 'count', 60, 15).lastInsertRowid;
-  const queso = insertIng.run('Queso', 'loncha', 'count', 40, 10).lastInsertRowid;
-  const papa = insertIng.run('Papa', 'g', 'weight', 8000, 1500).lastInsertRowid;
-  const aceite = insertIng.run('Aceite', 'ml', 'volume', 2000, 400).lastInsertRowid;
-  const chocolate = insertIng.run('Mezcla brownie', 'porción', 'portion', 20, 5).lastInsertRowid;
-
-  const insertRecipe = db.prepare(
-    'INSERT INTO recipes (product_id, ingredient_id, quantity, removable) VALUES (?, ?, ?, ?)'
-  );
-  insertRecipe.run(burger, pan, 1, 0);
-  insertRecipe.run(burger, carne, 150, 0);
-  insertRecipe.run(burger, lechuga, 2, 1);
-  insertRecipe.run(burger, tomate, 2, 1);
-  insertRecipe.run(burger, queso, 1, 1);
-  insertRecipe.run(papas, papa, 200, 0);
-  insertRecipe.run(papas, aceite, 20, 0);
-
-  const brownie = db.prepare("SELECT id FROM products WHERE name = 'Brownie'").get();
-  if (brownie) insertRecipe.run(brownie.id, chocolate, 1, 0);
+  // El menú real (categorías y productos JR) lo carga seedCatalog().
+  // Aquí no se siembran "Platos fuertes", "Acompañamientos" ni "Postres".
 
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(key, value);
-  }
-
-  const move = db.prepare(`
-    INSERT INTO inventory_movements
-      (ingredient_id, type, quantity, stock_after, reason, user_id, reference_type)
-    VALUES (?, 'purchase', ?, ?, 'Stock inicial', ?, 'seed')
-  `);
-  for (const ing of db.prepare('SELECT * FROM ingredients').all()) {
-    move.run(ing.id, ing.stock, ing.stock, adminId);
   }
 }
 
