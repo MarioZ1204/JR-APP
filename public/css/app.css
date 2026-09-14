@@ -545,10 +545,42 @@ img { max-width: 100%; height: auto; }
   width: 100%;
 }
 .pos-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 44px; height: 44px; border-radius: 14px;
   border: 1px solid var(--line); background: #fff;
-  font-size: 20px; font-weight: 700; color: var(--ink);
+  color: var(--ink);
   flex-shrink: 0;
+  padding: 0;
+  cursor: pointer;
+  transition: border-color .16s var(--ease), background .16s var(--ease), box-shadow .16s var(--ease);
+}
+.pos-back:hover {
+  border-color: #d4c4ae;
+  background: #fffcf8;
+  box-shadow: var(--shadow-sm);
+}
+.ico-back {
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-left: 2.5px solid currentColor;
+  border-bottom: 2.5px solid currentColor;
+  transform: rotate(45deg);
+  margin: 0 0 0 3px;
+}
+.btn-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+}
+.btn-back .ico-back {
+  width: 8px;
+  height: 8px;
+  margin: 0;
+  border-width: 2px;
 }
 .pos-bar-copy { min-width: 0; flex: 1; }
 .pos-bar-copy h1 {
@@ -738,12 +770,121 @@ img { max-width: 100%; height: auto; }
   border-top: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 8px;
 }
+.pos-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.bill-opts { margin-bottom: 14px; max-width: 520px; }
+.pos-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  min-height: 56px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: #fff;
+  box-shadow: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color .16s var(--ease), background .16s var(--ease), box-shadow .16s var(--ease);
+}
+.pos-opt:hover {
+  border-color: #d4c4ae;
+  background: #fffcf8;
+}
+.pos-opt.on {
+  border-color: rgba(194, 52, 40, .35);
+  background: linear-gradient(180deg, #fff8f6, #fff1ed);
+  box-shadow: inset 0 0 0 1px rgba(194, 52, 40, .08);
+}
+.pos-opt-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.pos-opt-copy b {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--ink);
+}
+.pos-opt-copy small {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.25;
+}
+.pos-opt.on .pos-opt-copy b { color: var(--brick-deep); }
+.pos-opt-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #e8e0d4;
+  transition: background .18s var(--ease), border-color .18s var(--ease);
+}
+.pos-opt-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.16);
+  transition: transform .18s var(--ease);
+}
+.pos-opt.on .pos-opt-switch {
+  background: var(--ok);
+  border-color: transparent;
+}
+.pos-opt.static { cursor: default; pointer-events: none; }
+.pos-opts-solo { grid-template-columns: 1fr; }
+.takeaway-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, #fff8f6, #fff);
+}
+.takeaway-cta {
+  min-height: 48px;
+  font-size: 16px;
+  font-weight: 700;
+}
+.takeaway-hint { margin: 0; }
+.takeaway-open {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+}
+.takeaway-open .table-card { margin: 0; }
 .pos-total {
   display: flex; justify-content: space-between; align-items: baseline;
-  font-size: 18px; margin-bottom: 2px;
+  font-size: 18px;
+  margin: 2px 0 4px;
+  padding: 8px 2px 2px;
+  border-top: 1px dashed var(--line);
 }
+.pos-total b { font-size: 22px; letter-spacing: -.02em; }
 .pos-ticket-extra { display: flex; gap: 8px; }
-.pos-ticket-extra .btn { flex: 1; }
+.pos-ticket-extra .btn { flex: 1; min-height: 40px; padding: 8px 10px; font-size: 13px; }
+.pos-ticket-foot .btn.danger {
+  min-height: 42px;
+  margin-top: 2px;
+}
+@media (max-width: 420px) {
+  .pos-opts { grid-template-columns: 1fr; }
+}
 
 .pos-dock {
   display: flex;
@@ -1098,6 +1239,11 @@ table.data tbody tr:hover { background: rgba(244, 238, 228, .5); }
   display: flex;
   align-items: center;
   order: -1;
+  width: 100%;
+  margin-bottom: 2px;
+}
+.page-lead .btn-back {
+  min-height: 40px;
 }
 .page-head-main { min-width: 0; flex: 1 1 200px; }
 .page-head .lede { margin-bottom: 0; margin-top: 4px; }

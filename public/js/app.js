@@ -1,6 +1,6 @@
 import { api, money, formatQty, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews, UNIT_KIND_LABELS, UNITS_BY_KIND, inferUnitKind, unitKindLabel } from './api.js';
-import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=71';
-import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=71';
+import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=75';
+import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=75';
 
 const root = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
@@ -622,7 +622,7 @@ function render() {
       <nav class="sidenav">
         <div class="sidenav-brand">
           <div class="logo-plate">
-            <img src="/logo.webp?v=71" alt="JR Burger" />
+            <img src="/logo.webp?v=72" alt="JR Burger" />
           </div>
           <b>${brand}</b>
           ${tagline ? `<span>${tagline}</span>` : ''}
@@ -635,7 +635,7 @@ function render() {
       </nav>
       <header class="topbar">
         <div class="brand">
-          <div class="logo-plate sm"><img src="/logo.webp?v=71" alt="${brand}" /></div>
+          <div class="logo-plate sm"><img src="/logo.webp?v=72" alt="${brand}" /></div>
           <div class="brand-copy"><b>${brand}</b>${tagline ? `<small>${tagline}</small>` : ''}</div>
         </div>
         <div class="grow"></div>
@@ -695,7 +695,7 @@ function loginView() {
   return `
   <div class="login">
     <div class="login-card card">
-      <img class="login-logo" src="/logo.webp?v=71" alt="${brand}" />
+      <img class="login-logo" src="/logo.webp?v=72" alt="${brand}" />
       <h1>${brand}</h1>
       ${tag ? `<p class="lede">${tag}</p>` : ''}
       <p class="login-sub">Mesas, cocina, caja e informes en un solo lugar</p>
@@ -766,6 +766,10 @@ function pageHead(title, lede, actions = '', lead = '') {
   </div>`;
 }
 
+function backBtn(attrs, label = 'Volver') {
+  return `<button type="button" class="btn ghost btn-back" ${attrs}><span class="ico-back" aria-hidden="true"></span>${label}</button>`;
+}
+
 function greetingLine() {
   const h = new Date().getHours();
   if (h < 12) return 'Buenos días';
@@ -777,7 +781,7 @@ function deltaBadge(pct) {
   const n = Number(pct) || 0;
   if (!n) return `<span class="delta flat">= ayer</span>`;
   const up = n > 0;
-  return `<span class="delta ${up ? 'up' : 'down'}">${up ? 'â–²' : 'â–¼'} ${Math.abs(n)}% vs ayer</span>`;
+  return `<span class="delta ${up ? 'up' : 'down'}">${up ? '&#9650;' : '&#9660;'} ${Math.abs(n)}% vs ayer</span>`;
 }
 
 function panelView() {
@@ -916,10 +920,15 @@ function panelView() {
 }
 
 function filterTables(list) {
+  const salon = (list || []).filter((t) => !t.is_takeaway);
   const f = state.tablesFilter;
-  if (f === 'all') return list;
-  if (f === 'occupied') return list.filter((t) => t.status === 'occupied' || t.joined_to_id);
-  return list.filter((t) => !t.joined_to_id && t.status === f);
+  if (f === 'all') return salon;
+  if (f === 'occupied') return salon.filter((t) => t.status === 'occupied' || t.joined_to_id);
+  return salon.filter((t) => !t.joined_to_id && t.status === f);
+}
+
+function takeawayTables() {
+  return (state.tables || []).filter((t) => t.is_takeaway && (t.order || t.status !== 'free'));
 }
 
 function legendChip(key, label, count, pipClass = key) {
@@ -964,12 +973,13 @@ function mesasView() {
   const mode = state.joinFrom ? 'Toque la otra mesa para juntarlas.' :
     state.transferFrom ? 'Toque la mesa a la que quiere pasar el pedido.' :
     state.floorEdit ? 'Arrastre las mesas a su sitio en el local.' :
-    'Toque una mesa para tomar o ver el pedido.';
+    'Toque una mesa o abra un pedido para llevar.';
+  const salon = filterTables(state.tables);
   const counts = {
-    free: state.tables.filter((t) => t.status === 'free' && !t.joined_to_id).length,
-    occupied: state.tables.filter((t) => t.status === 'occupied' || t.joined_to_id).length,
-    waiting_payment: state.tables.filter((t) => t.status === 'waiting_payment').length,
-    reserved: state.tables.filter((t) => t.status === 'reserved').length
+    free: salon.filter((t) => t.status === 'free' && !t.joined_to_id).length,
+    occupied: salon.filter((t) => t.status === 'occupied' || t.joined_to_id).length,
+    waiting_payment: salon.filter((t) => t.status === 'waiting_payment').length,
+    reserved: salon.filter((t) => t.status === 'reserved').length
   };
   const isList = state.tablesView === 'list';
   const editBtn = picking || isList
@@ -978,8 +988,9 @@ function mesasView() {
   const viewToggle = picking ? '' : `
     <button type="button" class="btn ${!isList ? 'primary' : 'ghost'}" data-act="tables-view" data-mode="floor">Plano</button>
     <button type="button" class="btn ${isList ? 'primary' : 'ghost'}" data-act="tables-view" data-mode="list">Lista</button>`;
-  const placed = floorPositions(filterTables(state.tables));
-  const sorted = filterTables([...state.tables]).sort((a, b) => String(a.name).localeCompare(String(b.name), 'es', { numeric: true }));
+  const placed = floorPositions(salon);
+  const sorted = [...salon].sort((a, b) => String(a.name).localeCompare(String(b.name), 'es', { numeric: true }));
+  const takeaways = takeawayTables();
   const filterBar = picking ? '' : `
     <div class="legend legend-filters">
       <button type="button" class="legend-chip${state.tablesFilter === 'all' ? ' on' : ''}" data-act="tables-filter" data-filter="all">Todas</button>
@@ -991,6 +1002,11 @@ function mesasView() {
   return `
     ${pageHead('Mesas', mode, `${viewToggle}${editBtn}`)}
     ${stockAlert()}
+    ${picking ? '' : `
+    <div class="takeaway-bar">
+      <button type="button" class="btn primary takeaway-cta" data-act="open-takeaway">Para llevar</button>
+      ${takeaways.length ? `<div class="takeaway-open">${takeaways.map(tableCard).join('')}</div>` : '<p class="hint takeaway-hint">Pedidos para llevar sin ocupar mesa del salón.</p>'}
+    </div>`}
     ${filterBar}
     ${sorted.length === 0 && state.tablesFilter !== 'all'
       ? `<div class="empty card">No hay mesas con ese filtro. <button type="button" class="btn ghost sm" data-act="tables-filter" data-filter="all">Ver todas</button></div>`
@@ -1046,7 +1062,7 @@ function tableCard(t) {
   const label = joined ? `Junto con ${esc(t.joined_to_name)}` : TABLE_STATUS[t.status];
   const orderAmt = t.order ? (t.order.payable != null ? t.order.payable : t.order.subtotal) : 0;
   const extra = t.order
-    ? `${t.order.item_count} productos · ${money(orderAmt)}${t.order.takeaway ? ' · Para llevar' : ''}`
+    ? `${t.order.item_count} productos · ${money(orderAmt)}${t.order.takeaway ? ' · Para llevar' : ''}${t.order.combo ? ' · Combo' : ''}`
     : `${t.seats} personas`;
   return `
     <button class="card table-card ${status} ${joined ? 'joined' : ''} ${t.order ? 'pulse' : ''}${status === 'waiting_payment' ? ' pay-attention' : ''}"
@@ -1082,7 +1098,7 @@ function catKey(name) {
 
 function catIcon(name) {
   const key = catKey(name);
-  return `<img class="cat-ico cat-ico-${key}" src="/icons/cats/${key}.webp?v=71" alt="" width="64" height="64" decoding="async" draggable="false" />`;
+  return `<img class="cat-ico cat-ico-${key}" src="/icons/cats/${key}.webp?v=75" alt="" width="64" height="64" decoding="async" draggable="false" />`;
 }
 
 function orderView() {
@@ -1100,6 +1116,7 @@ function orderView() {
   const displayTotal = o.payable != null ? o.payable : o.subtotal;
   const feeOn = state.settings.takeaway_fee_enabled !== false;
   const feeAmt = Math.max(0, Math.round(Number(state.settings.takeaway_fee_amount != null ? state.settings.takeaway_fee_amount : 500) || 0));
+  const comboAmt = Math.max(0, Math.round(Number(state.settings.combo_amount != null ? state.settings.combo_amount : 6000) || 0));
   const joinedTables = (state.tables || []).filter((t) => t.joined_to_id === o.table_id);
   const backAct = q ? 'data-act="pos-clear-search"' : (browsing ? 'data-act="nav" data-view="mesas"' : 'data-act="cat-home"');
   const title = q ? 'Buscar' : (browsing ? esc(o.table_name) : esc(cat?.name || 'Grupo'));
@@ -1140,7 +1157,7 @@ function orderView() {
       <div class="pos-main">
         <header class="pos-bar">
           <div class="pos-bar-top">
-            <button type="button" class="pos-back" ${backAct} aria-label="Volver">â†</button>
+            <button type="button" class="pos-back" ${backAct} aria-label="Volver"><span class="ico-back" aria-hidden="true"></span></button>
             <div class="pos-bar-copy">
               <h1>${title}</h1>
               <p>${subtitle}</p>
@@ -1167,7 +1184,7 @@ function orderView() {
               <div class="pos-line-amt">${money(it.quantity * it.unit_price)}</div>
               ${it.status !== 'cancelled' && !billed ? `
                 <div class="pos-line-qty">
-                  <button type="button" data-act="qty" data-id="${it.id}" data-d="-1">âˆ’</button>
+                  <button type="button" data-act="qty" data-id="${it.id}" data-d="-1">&minus;</button>
                   <span>${it.quantity}</span>
                   <button type="button" data-act="qty" data-id="${it.id}" data-d="1">+</button>
                   ${orderItemAllowsCustomNotes(it) ? `<button type="button" class="ghost" data-act="note-item" data-id="${it.id}">Nota</button>` : ''}
@@ -1177,20 +1194,33 @@ function orderView() {
         </div>
         <div class="pos-ticket-foot">
           ${billed ? '' : `
-          <button type="button" class="btn ${o.takeaway ? 'gold' : 'ghost'} block" data-act="toggle-takeaway">
-            ${o.takeaway ? '✓ Para llevar' : 'Para llevar'}
-            ${o.takeaway && feeOn && feeAmt > 0 ? ` · +${money(feeAmt)} contenedor` : ''}
-          </button>`}
-          ${o.takeaway && o.container_fee > 0 ? `<div class="between muted small"><span>Contenedor</span><span>${money(o.container_fee)}</span></div>` : ''}
+          <div class="pos-opts pos-opts-solo">
+            ${o.takeaway || o.table_is_takeaway ? `
+            <div class="pos-opt on static" aria-hidden="true">
+              <span class="pos-opt-switch"></span>
+              <span class="pos-opt-copy">
+                <b>Para llevar</b>
+                <small>${feeOn && feeAmt > 0 ? `Contenedor +${money(feeAmt)}` : 'Sin cargo extra'}</small>
+              </span>
+            </div>` : ''}
+            <button type="button" class="pos-opt${o.combo ? ' on' : ''}" data-act="toggle-combo" aria-pressed="${o.combo ? 'true' : 'false'}">
+              <span class="pos-opt-switch" aria-hidden="true"></span>
+              <span class="pos-opt-copy">
+                <b>Añadir Combo</b>
+                <small>Gaseosa + papas · +${money(comboAmt)}</small>
+              </span>
+            </button>
+          </div>`}
           <div class="pos-total"><span>Total</span><b>${money(displayTotal)}</b></div>
-          <button type="button" class="btn primary block lg${state.busy === 'send' ? ' is-busy' : ''}" data-act="send-order" ${!unsent || state.busy ? 'disabled' : ''}>${state.busy === 'send' ? 'Enviando…' : `Enviar a cocina (${unsent})`}</button>
-          <button type="button" class="btn gold block" data-act="wait-pay">Pedir cuenta</button>
+          <button type="button" class="btn primary block lg${state.busy === 'send' ? ' is-busy' : ''}" data-act="send-order" ${!unsent || state.busy ? 'disabled' : ''}>${state.busy === 'send' ? 'Enviando…' : `Enviar pedido (${unsent})`}</button>
+          <button type="button" class="btn ghost block" data-act="wait-pay">Pedir cuenta</button>
+          ${o.takeaway || o.table_is_takeaway ? '' : `
           <div class="pos-ticket-extra">
             <button type="button" class="btn ghost" data-act="join-mode">Juntar</button>
             <button type="button" class="btn ghost" data-act="transfer-mode">Pasar</button>
             ${joinedTables.length ? `<button type="button" class="btn ghost" data-act="split-tables">Separar (${joinedTables.length})</button>` : ''}
-          </div>
-          ${billed ? '' : `<button type="button" class="btn danger block" data-act="cancel-order">${active.length ? 'Cancelar cuenta' : 'Liberar mesa'}</button>`}
+          </div>`}
+          ${billed ? '' : `<button type="button" class="btn danger block" data-act="cancel-order">${active.length ? 'Cancelar cuenta' : (o.takeaway || o.table_is_takeaway ? 'Cancelar pedido' : 'Liberar mesa')}</button>`}
         </div>
       </aside>
     </div>
@@ -1198,7 +1228,7 @@ function orderView() {
     ${billed ? '' : `
     <div class="pos-dock${state.cartBump ? ' bump' : ''}">
       <button type="button" class="pos-dock-cart" data-act="toggle-ticket">
-        <span>${active.length} prod.${o.takeaway ? ' · llevar' : ''}</span>
+        <span>${active.length} prod.${o.takeaway ? ' · llevar' : ''}${o.combo ? ' · combo' : ''}</span>
         <b>${money(displayTotal)}</b>
       </button>
       <button type="button" class="btn primary${state.busy === 'send' ? ' is-busy' : ''}" data-act="send-order" ${!unsent || state.busy ? 'disabled' : ''}>${state.busy === 'send' ? 'Enviando…' : `Enviar${unsent ? ` (${unsent})` : ''}`}</button>
@@ -1236,7 +1266,7 @@ function kitchenView() {
         <article class="card kds-card ${esc(o.status)} ${wait.minutes >= 10 ? 'late' : ''}">
           <div class="kds-top">
             <div>
-              <h2>${esc(o.table_name)}${o.takeaway ? ' · Llevar' : ''}</h2>
+              <h2>${esc(o.table_name)}${o.takeaway ? ' · Llevar' : ''}${o.combo ? ' · Combo' : ''}</h2>
               <div class="small muted">#${o.id} · ${esc(o.waiter_name)}</div>
             </div>
             <div class="kds-meta">
@@ -1325,6 +1355,10 @@ function billForm(o, openCash) {
   const included = state.settings.tax_included;
   const subtotal = o.subtotal;
   const containerFee = Math.max(0, Math.round(Number(o.container_fee) || 0));
+  const comboFee = Math.max(0, Math.round(Number(o.combo_fee) || 0));
+  const feeAmt = Math.max(0, Math.round(Number(state.settings.takeaway_fee_amount != null ? state.settings.takeaway_fee_amount : 500) || 0));
+  const feeOn = Boolean(Number(state.settings.takeaway_fee_enabled ?? 1));
+  const comboAmt = Math.max(0, Math.round(Number(state.settings.combo_amount != null ? state.settings.combo_amount : 6000) || 0));
   const promo = state.billPromo;
   const promoOn = Boolean(promo?.applied && Number(promo.discount) > 0);
   const discount = promoOn
@@ -1335,17 +1369,30 @@ function billForm(o, openCash) {
   let tax = 0, total = base;
   if (taxRate > 0 && !included) { tax = Math.round(base * taxRate / 100); total = base + tax; }
   else if (taxRate > 0 && included) tax = Math.round(base - base / (1 + taxRate / 100));
-  total = Math.round(total + tip + containerFee);
+  total = Math.round(total + tip + containerFee + comboFee);
   return `
-    ${pageHead('Cobrar ' + esc(o.table_name), '', '', `<button class="btn ghost" data-act="nav" data-view="facturar">Volver</button>`)}
+    ${pageHead('Cobrar ' + esc(o.table_name), '', '', backBtn('data-act="nav" data-view="facturar"'))}
     ${!openCash ? '<div class="alert warn">Primero abra la caja.</div>' : ''}
-    ${o.takeaway ? `<div class="alert warn">Para llevar${containerFee > 0 ? ` · contenedor ${money(containerFee)}` : ''}</div>` : ''}
     ${!['billed', 'cancelled'].includes(o.status) ? `
-      <div class="row" style="margin-bottom:12px">
-        <button type="button" class="btn ${o.takeaway ? 'gold' : 'ghost'}" data-act="toggle-takeaway">
-          ${o.takeaway ? '✓ Para llevar' : 'Marcar para llevar'}
+      <div class="pos-opts bill-opts pos-opts-solo">
+        ${o.takeaway || o.table_is_takeaway ? `
+        <div class="pos-opt on static" aria-hidden="true">
+          <span class="pos-opt-switch"></span>
+          <span class="pos-opt-copy">
+            <b>Para llevar</b>
+            <small>${feeOn && feeAmt > 0 ? `Contenedor +${money(feeAmt)}` : 'Sin cargo extra'}</small>
+          </span>
+        </div>` : ''}
+        <button type="button" class="pos-opt${o.combo ? ' on' : ''}" data-act="toggle-combo" aria-pressed="${o.combo ? 'true' : 'false'}">
+          <span class="pos-opt-switch" aria-hidden="true"></span>
+          <span class="pos-opt-copy">
+            <b>Añadir Combo</b>
+            <small>Gaseosa + papas · +${money(comboAmt)}</small>
+          </span>
         </button>
       </div>` : ''}
+    ${o.takeaway ? `<div class="alert warn">Para llevar${containerFee > 0 ? ` · contenedor ${money(containerFee)}` : ''}</div>` : ''}
+    ${o.combo ? `<div class="alert warn">Combo gaseosa + papas · ${money(comboFee)}</div>` : ''}
     ${promoOn ? `<div class="alert warn">${esc(promo.label || 'Segunda hamburguesa al 50%')} · descuento ${money(discount)}</div>` : ''}
     <div class="bill-grid">
       <div class="card">
@@ -1354,6 +1401,7 @@ function billForm(o, openCash) {
         <div class="between muted"><span>Suma</span><span>${money(subtotal)}</span></div>
         ${discount ? `<div class="between muted"><span>${promoOn ? (promo.ticket_label || promo.label || '2da hamburguesa al 50%') : 'Descuento'}</span><span>-${money(discount)}</span></div>` : ''}
         ${containerFee ? `<div class="between muted"><span>Contenedor</span><span>${money(containerFee)}</span></div>` : ''}
+        ${comboFee ? `<div class="between muted"><span>Combo (gaseosa + papas)</span><span>${money(comboFee)}</span></div>` : ''}
         ${taxRate ? `<div class="between muted"><span>IVA ${taxRate}%${included ? ' (incluido)' : ''}</span><span>${money(tax)}</span></div>` : ''}
         ${tip ? `<div class="between muted"><span>Propina</span><span>${money(tip)}</span></div>` : ''}
         <div class="ticket-total"><span>Total</span><b>${money(total)}</b></div>
@@ -1440,7 +1488,7 @@ function cashView() {
       </form>
       <form class="card" data-act="close-cash">
         <div class="ticket-head">Cierre de caja</div>
-        <p class="hint">Cuente el efectivo. El sistema compara con la base + ventas en efectivo âˆ’ gastos.</p>
+        <p class="hint">Cuente el efectivo. El sistema compara con la base + ventas en efectivo &minus; gastos.</p>
         <div class="field"><label>¿Cuánto efectivo hay ahora?</label><input name="counted_cash" type="number" min="0" required /></div>
         <div class="field"><label>Nota (si quiere)</label><input name="notes" /></div>
         <button type="submit" class="btn danger block${state.busy === 'cash-close' ? ' is-busy' : ''}" ${state.busy ? 'disabled' : ''}>${state.busy === 'cash-close' ? 'Cerrando…' : 'Cerrar caja'}</button>
@@ -1831,7 +1879,7 @@ function reportsView() {
 function configView() {
   const s = state.settings;
   const section = state.configSection;
-  const back = `<button type="button" class="btn ghost" data-act="config-section" data-id="">Volver</button>`;
+  const back = backBtn('data-act="config-section" data-id=""');
   const open = (state.tables || []).filter((t) => t.order).length;
   const occ = (state.tables || []).filter((t) => t.order || t.status === 'occupied' || t.status === 'waiting_payment').length;
   const logo = state.receiptLogo || {};
@@ -1880,6 +1928,10 @@ function configView() {
         <div class="field"><label>Valor del contenedor ($)</label>
           <input name="takeaway_fee_amount" type="number" min="0" step="1" value="${Math.max(0, Math.round(Number(s.takeaway_fee_amount != null ? s.takeaway_fee_amount : 500) || 0))}" />
           <p class="hint">El cobro se activa o desactiva en el panel principal. Solo aplica a pedidos «Para llevar».</p>
+        </div>
+        <div class="field"><label>Valor del combo ($)</label>
+          <input name="combo_amount" type="number" min="0" step="1" value="${Math.max(0, Math.round(Number(s.combo_amount != null ? s.combo_amount : 6000) || 0))}" />
+          <p class="hint">Gaseosa pequeña + porción de papas. Se activa con «Añadir Combo» en el pedido.</p>
         </div>
         <button class="btn primary">Guardar</button>
       </form>`;
@@ -1998,7 +2050,7 @@ function configView() {
       <div class="card form-narrow">
         <div class="between"><div class="ticket-head" style="margin:0">Lista de mesas</div>
           <button class="btn" data-act="new-table">Agregar mesa</button></div>
-        ${(state.tables || []).map((t) => `
+        ${(state.tables || []).filter((t) => !t.is_takeaway).map((t) => `
           <div class="table-row">
             <span>${esc(t.name)} · ${t.seats} sillas</span>
             <span class="row">
@@ -2173,24 +2225,25 @@ async function onClick(e) {
       return;
     }
     if (act === 'table') await onTable(Number(el.dataset.id));
+    if (act === 'open-takeaway') await openTakeaway();
     if (act === 'add-prod') await addProduct(Number(el.dataset.id));
     if (act === 'qty') await changeQty(Number(el.dataset.id), Number(el.dataset.d));
     if (act === 'note-item') await noteItem(Number(el.dataset.id));
     if (act === 'cancel-item') await cancelItem(Number(el.dataset.id));
     if (act === 'send-order') await sendOrder();
     if (act === 'wait-pay') await waitPay();
-    if (act === 'toggle-takeaway') {
+    if (act === 'toggle-combo') {
       if (!state.order || state.busy) return;
-      const next = !state.order.takeaway;
-      state.busy = 'takeaway';
+      const next = !state.order.combo;
+      state.busy = 'combo';
       render();
       try {
-        const r = await api(`/api/orders/${state.order.id}/takeaway`, {
+        const r = await api(`/api/orders/${state.order.id}/combo`, {
           method: 'POST',
-          body: { takeaway: next }
+          body: { combo: next }
         });
         state.order = r.order;
-        toast(next ? 'Pedido para llevar' : 'Pedido en mesa');
+        toast(next ? 'Combo añadido (gaseosa + papas)' : 'Combo quitado');
       } finally {
         state.busy = null;
         render();
@@ -2387,6 +2440,9 @@ async function onSubmit(e) {
       if (obj.block_on_no_stock != null) obj.block_on_no_stock = obj.block_on_no_stock === '1';
       if (obj.takeaway_fee_amount != null) {
         obj.takeaway_fee_amount = Math.max(0, Math.round(Number(obj.takeaway_fee_amount) || 0));
+      }
+      if (obj.combo_amount != null) {
+        obj.combo_amount = Math.max(0, Math.round(Number(obj.combo_amount) || 0));
       }
       const r = await api('/api/settings', { method: 'PUT', body: obj });
       state.settings = r.settings;
@@ -2599,6 +2655,12 @@ function exportCurrentReport() {
 async function onTable(id) {
   if (state.floorEdit) return;
   const t = state.tables.find((x) => x.id === id);
+  if (!t) return;
+  if (t.is_takeaway) {
+    if (t.order) go('comanda', t.order.id);
+    else await openTakeaway();
+    return;
+  }
   if (state.joinFrom) {
     await api(`/api/tables/${state.joinFrom}/join`, { method: 'POST', body: { other_id: id } });
     state.joinFrom = null; toast('Mesas unidas'); go('mesas'); return;
@@ -2646,6 +2708,16 @@ async function onTable(id) {
   const targetId = t.joined_to_id || t.id;
   const r = await api('/api/orders', { method: 'POST', body: { table_id: targetId } });
   go('comanda', r.order.id);
+}
+
+async function openTakeaway() {
+  try {
+    const r = await api('/api/orders/takeaway', { method: 'POST', body: {} });
+    toast('Pedido para llevar');
+    go('comanda', r.order.id);
+  } catch (e) {
+    toast(e.message || 'No se pudo abrir para llevar', true);
+  }
 }
 
 function joinedTableActions(t) {
@@ -3155,7 +3227,7 @@ function recipeRow(r, idx) {
       <input name="qty_${idx}" type="number" step="0.01" min="0" placeholder="Cant." value="${r.quantity ?? ''}" />
       <span class="recipe-unit">${esc(unitLabel)} / producto</span>
     </div>
-    <button type="button" class="btn ghost" data-act="del-rec" title="Quitar esta línea">âœ•</button>
+    <button type="button" class="btn ghost" data-act="del-rec" title="Quitar esta línea">&times;</button>
     <label class="chk"><input type="checkbox" name="rem_${idx}" ${rem ? 'checked' : ''} /> Se puede quitar</label>
   </div>`;
 }

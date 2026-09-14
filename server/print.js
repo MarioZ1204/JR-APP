@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { getDb, getSetting } = require('./db');
-const { parseRemoved, parseAdded } = require('./inventory');
+const { parseRemoved, parseAdded, comboVirtualItems } = require('./inventory');
 const { money } = require('./format');
 const { logoEscPos, ticketLogoHtml } = require('./escpos-logo');
 
@@ -38,8 +38,8 @@ function printPageStyle(widthMm) {
   html, body { margin: 0; padding: 2mm; height: auto; overflow: visible; }
   body { font-family: 'Courier New', monospace; font-size: 12px; width: ${widthMm}mm; color: #000; }
   h1 { font-size: 12px; margin: 0 0 4px; text-align: center; }
-  .ticket-logo { text-align: center; margin: 0 0 6px; }
-  .ticket-logo img { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .ticket-logo { text-align: center; margin: 0 0 4px; }
+  .ticket-logo img { display: block; margin: 0 auto; max-width: 42%; height: auto; }
   .c { text-align: center; }
   .muted { font-size: 12px; }
   hr { border: none; border-top: 1px dashed #000; margin: 6px 0; }
@@ -102,7 +102,7 @@ function ascii(text) {
 function invoicePayload(invoiceId) {
   const db = getDb();
   const inv = db.prepare(`
-    SELECT i.*, t.name AS table_name, u.name AS cashier_name, o.id AS order_id, o.takeaway AS order_takeaway
+    SELECT i.*, t.name AS table_name, u.name AS cashier_name, o.id AS order_id, o.takeaway AS order_takeaway, o.combo AS order_combo
     FROM invoices i
     JOIN restaurant_tables t ON t.id = i.table_id
     JOIN users u ON u.id = i.cashier_id
@@ -138,6 +138,7 @@ function ticketLines(payload) {
   push(`Fecha: ${inv.created_at}`);
   push(`Mesa: ${inv.table_name}`);
   if (Number(inv.container_fee) > 0 || Number(inv.order_takeaway) === 1) push('Para llevar');
+  if (Number(inv.combo_fee) > 0 || Number(inv.order_combo) === 1) push('Combo: gaseosa + papas');
   push(`Cajero: ${inv.cashier_name}`);
   push('-'.repeat(cols));
   for (const it of items) {
@@ -152,6 +153,7 @@ function ticketLines(payload) {
     push(pad(dLabel, '-' + money(inv.discount), cols));
   }
   if (Number(inv.container_fee) > 0) push(pad('Contenedor', money(inv.container_fee), cols));
+  if (Number(inv.combo_fee) > 0) push(pad('Combo', money(inv.combo_fee), cols));
   if (Number(inv.tip) > 0) push(pad('Propina', money(inv.tip), cols));
   push(pad('TOTAL', money(inv.total), cols));
   push('-'.repeat(cols));
@@ -170,7 +172,7 @@ function ticketLines(payload) {
 function buildEscPos(payload) {
   const { lines, widthMm } = ticketLines(payload);
   const chunks = [Buffer.from([0x1b, 0x40])];
-  const logo = logoEscPos(widthMm);
+  const logo = logoEscPos(widthMm, 'md');
   if (logo.length) chunks.push(logo);
   chunks.push(Buffer.from([0x1b, 0x61, 0x01]));
   let centered = true;
@@ -213,13 +215,14 @@ function ticketHtml(payload, opts = {}) {
 <title>Ticket ${inv.number}</title>
 <style>${printPageStyle(widthMm)}</style></head>
 <body>
-  ${ticketLogoHtml(widthMm)}
+  ${ticketLogoHtml(widthMm, 'md')}
   ${headerBits.length ? `<div class="c muted">${headerBits.join('<br>')}</div>` : ''}
   <hr>
   <div>Ticket #${String(inv.number).padStart(5, '0')}</div>
   <div>Fecha: ${escapeHtml(inv.created_at)}</div>
   <div>Mesa: ${escapeHtml(inv.table_name)}</div>
   ${Number(inv.container_fee) > 0 || Number(inv.order_takeaway) === 1 ? '<div><b>Para llevar</b></div>' : ''}
+  ${Number(inv.combo_fee) > 0 || Number(inv.order_combo) === 1 ? '<div><b>Combo: gaseosa + papas</b></div>' : ''}
   <div>Cajero: ${escapeHtml(inv.cashier_name)}</div>
   <hr>
   <table>${rows}</table>
@@ -228,6 +231,7 @@ function ticketHtml(payload, opts = {}) {
     <tr><td>Subtotal</td><td class="r">${money(inv.subtotal)}</td></tr>
     ${Number(inv.discount) > 0 ? `<tr><td>${escapeHtml(discountLabel)}</td><td class="r">-${money(inv.discount)}</td></tr>` : ''}
     ${Number(inv.container_fee) > 0 ? `<tr><td>Contenedor</td><td class="r">${money(inv.container_fee)}</td></tr>` : ''}
+    ${Number(inv.combo_fee) > 0 ? `<tr><td>Combo</td><td class="r">${money(inv.combo_fee)}</td></tr>` : ''}
     ${Number(inv.tip) > 0 ? `<tr><td>Propina</td><td class="r">${money(inv.tip)}</td></tr>` : ''}
     <tr class="total"><td>TOTAL</td><td class="r">${money(inv.total)}</td></tr>
   </table>
@@ -298,9 +302,10 @@ function kitchenPayload(order, items, stationLabel, extraRound) {
   const lines = [];
   const push = (s) => lines.push(s);
   push(name);
-  push('*** ' + stationLabel + ' ***');
+  if (stationLabel) push('*** ' + stationLabel + ' ***');
   push(order.table_name || 'Mesa');
   if (Number(order.takeaway) === 1) push('*** PARA LLEVAR ***');
+  if (Number(order.combo) === 1) push('*** COMBO: gaseosa + papas ***');
   if (extraRound) push('*** NUEVO ***');
   push('-'.repeat(cols));
   push('Pedido #' + order.id);
@@ -321,15 +326,19 @@ function buildKitchenEscPos(payload) {
   const { order, items, extraRound, stationLabel, cols, when, widthMm } = payload;
   const dash = '-'.repeat(cols);
   const chunks = [Buffer.from([0x1b, 0x40])];
-  const logo = logoEscPos(widthMm);
+  const logo = logoEscPos(widthMm, 'sm');
   if (logo.length) chunks.push(logo);
   chunks.push(Buffer.from([0x1b, 0x61, 0x01]));
   chunks.push(Buffer.from(ascii(getSetting('business_name', 'JR Burger')) + '\n', 'latin1'));
+  if (stationLabel) {
+    chunks.push(Buffer.from([0x1b, 0x45, 0x01]));
+    chunks.push(Buffer.from('*** ' + ascii(stationLabel) + ' ***\n', 'latin1'));
+  }
   chunks.push(Buffer.from([0x1b, 0x45, 0x01]));
-  chunks.push(Buffer.from('*** ' + ascii(stationLabel) + ' ***\n', 'latin1'));
   chunks.push(Buffer.from(ascii(order.table_name || 'Mesa') + '\n', 'latin1'));
   chunks.push(Buffer.from([0x1b, 0x45, 0x00]));
   if (Number(order.takeaway) === 1) chunks.push(Buffer.from('*** PARA LLEVAR ***\n', 'latin1'));
+  if (Number(order.combo) === 1) chunks.push(Buffer.from('*** COMBO: gaseosa + papas ***\n', 'latin1'));
   if (extraRound) chunks.push(Buffer.from('*** NUEVO ***\n', 'latin1'));
   chunks.push(Buffer.from([0x1b, 0x61, 0x00]));
   chunks.push(Buffer.from(dash + '\n', 'latin1'));
@@ -374,11 +383,12 @@ function kitchenHtml(payload) {
   .item { font-size: 13px; font-weight: bold; margin: 8px 0; }
 </style></head>
 <body>
-  ${ticketLogoHtml(widthMm)}
+  ${ticketLogoHtml(widthMm, 'sm')}
   <h1>${escapeHtml(name)}</h1>
-  <div class="c">*** ${escapeHtml(stationLabel)} ***</div>
+  ${stationLabel ? `<div class="c">*** ${escapeHtml(stationLabel)} ***</div>` : ''}
   <h2>${escapeHtml(order.table_name || 'Mesa')}</h2>
   ${Number(order.takeaway) === 1 ? '<div class="nuevo">*** PARA LLEVAR ***</div>' : ''}
+  ${Number(order.combo) === 1 ? '<div class="nuevo">*** COMBO: gaseosa + papas ***</div>' : ''}
   ${extraRound ? '<div class="nuevo">*** NUEVO ***</div>' : ''}
   <hr>
   <div>Pedido #${order.id}</div>
@@ -516,7 +526,7 @@ async function printTest() {
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
     @page { size: ${widthMm}mm auto; margin: 2mm; }
     body { font-family: 'Courier New', monospace; font-size: 13px; width: ${widthMm}mm; text-align:center; }
-  </style></head><body>${ticketLogoHtml(widthMm)}<h2>${escapeHtml(name)}</h2><p>Prueba de impresion</p><p>${escapeHtml(when)}</p></body></html>`;
+  </style></head><body>${ticketLogoHtml(widthMm, 'md')}<h2>${escapeHtml(name)}</h2><p>Prueba de impresion</p><p>${escapeHtml(when)}</p></body></html>`;
 
   if (enabled && printerName) {
     const cols = widthMm === 58 ? 32 : 48;
@@ -557,20 +567,25 @@ async function printTest() {
 }
 
 async function printKitchenOrder({ order, items, extraRound }) {
-  const kitchen = items.filter((i) => i.station !== 'bar');
-  const bar = items.filter((i) => i.station === 'bar');
-  const jobs = [];
-  if (kitchen.length) {
-    const payload = kitchenPayload(order, kitchen, 'COCINA', extraRound);
-    jobs.push({ buffer: buildKitchenEscPos(payload), html: kitchenHtml(payload) });
+  const list = [...(items || [])];
+  if (Number(order.combo) === 1) {
+    for (const v of comboVirtualItems()) {
+      list.push({
+        quantity: v.quantity,
+        product_name: v.product_name,
+        notes: v.notes,
+        station: v.station,
+        removed_json: '[]',
+        added_json: '[]'
+      });
+    }
   }
-  if (bar.length) {
-    const payload = kitchenPayload(order, bar, 'BARRA', extraRound);
-    jobs.push({ buffer: buildKitchenEscPos(payload), html: kitchenHtml(payload) });
-  }
-  if (!jobs.length) return { ok: true, mode: 'usb', html: null, message: '' };
+  if (!list.length) return { ok: true, mode: 'usb', html: null, message: '' };
 
-  const html = jobs.map((j) => j.html).join('<div style="page-break-after:always"></div>');
+  const payload = kitchenPayload(order, list, '', extraRound);
+  const buffer = buildKitchenEscPos(payload);
+  const html = kitchenHtml(payload);
+
   const enabled = getSetting('printer_enabled', '0') === '1';
   const printerName = getSetting('printer_name', '').trim();
 
@@ -579,27 +594,19 @@ async function printKitchenOrder({ order, items, extraRound }) {
       ok: true,
       mode: 'browser',
       html,
-      message: 'Se abre el ticket de cocina. El pedido ya quedó enviado.'
+      message: 'Se abre el ticket de pedido. El pedido ya quedó enviado.'
     };
   }
 
   try {
-    let allOk = true;
-    let lastErr = '';
-    for (const job of jobs) {
-      const sent = await printRawWindows(job.buffer, printerName);
-      if (!sent.ok) {
-        allOk = false;
-        lastErr = sent.error || '';
-      }
-    }
-    if (allOk) return { ok: true, mode: 'usb', html, message: 'Ticket de cocina impreso' };
+    const sent = await printRawWindows(buffer, printerName);
+    if (sent.ok) return { ok: true, mode: 'usb', html, message: 'Ticket de pedido impreso' };
     return {
       ok: false,
       mode: 'browser',
       html,
-      error: lastErr,
-      message: 'El pedido ya fue a cocina. No se pudo imprimir directo.'
+      error: sent.error || '',
+      message: 'El pedido ya fue enviado. No se pudo imprimir directo.'
     };
   } catch (e) {
     return {
@@ -607,7 +614,7 @@ async function printKitchenOrder({ order, items, extraRound }) {
       mode: 'browser',
       html,
       error: e.message,
-      message: 'El pedido ya fue a cocina. No se pudo imprimir directo.'
+      message: 'El pedido ya fue enviado. No se pudo imprimir directo.'
     };
   }
 }
@@ -641,7 +648,7 @@ function htmlFromLines(title, lines) {
 <html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
 <style>${printPageStyle(widthMm)}</style></head>
 <body>
-  ${ticketLogoHtml(widthMm)}
+  ${ticketLogoHtml(widthMm, 'md')}
   <h1>${escapeHtml(name)}</h1>
   <pre>${escapeHtml(lines.join('\n'))}</pre>
 </body></html>`;
@@ -650,7 +657,7 @@ function htmlFromLines(title, lines) {
 function buildLinesEscPos(lines) {
   const { widthMm } = paperSize();
   const chunks = [Buffer.from([0x1b, 0x40])];
-  const logo = logoEscPos(widthMm);
+  const logo = logoEscPos(widthMm, 'md');
   if (logo.length) chunks.push(logo);
   chunks.push(Buffer.from([0x1b, 0x61, 0x01]));
   let centered = true;

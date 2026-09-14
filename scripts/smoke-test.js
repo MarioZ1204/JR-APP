@@ -137,7 +137,8 @@ async function runTests(ctx) {
 
     r = await req('GET', '/api/tables', { cookie: meseroCookie });
     if (r.status === 200 && r.data.tables?.length >= 1) {
-      tableId = r.data.tables[0].id;
+      const salon = (r.data.tables || []).find((t) => !t.is_takeaway) || r.data.tables[0];
+      tableId = salon.id;
       pass('GET /api/tables');
     } else fail('GET /api/tables', r.data.error);
 
@@ -293,98 +294,82 @@ async function runTests(ctx) {
         pass('Settings: takeaway_fee expuesto');
       } else fail('Settings takeaway_fee', JSON.stringify(r.data.settings));
 
-      r = await req('GET', '/api/tables', { cookie: meseroCookie });
-      const free = (r.data.tables || []).find((t) => !t.order && !t.joined_to_id && t.status === 'free');
-      const twTable = free?.id || (r.data.tables || []).find((t) => !t.joined_to_id)?.id;
-      if (!twTable) {
-        fail('Para llevar setup', 'No hay mesa disponible');
+      r = await req('POST', '/api/orders/takeaway', { cookie: meseroCookie, body: {} });
+      const twOrderId = r.data.order?.id;
+      if (r.status !== 200 || !twOrderId || r.data.order?.takeaway !== true) {
+        fail('POST /api/orders/takeaway', r.data.error || JSON.stringify(r.data.order));
       } else {
-        r = await req('POST', '/api/orders', { cookie: meseroCookie, body: { table_id: twTable } });
-        const twOrderId = r.data.order?.id;
-        if (!twOrderId) fail('Para llevar abrir pedido', r.data.error);
+        pass('POST /api/orders/takeaway (sin mesa)');
+        r = await req('POST', `/api/orders/${twOrderId}/items`, {
+          cookie: meseroCookie,
+          body: { product_id: productId, quantity: 1 }
+        });
+        const sub = Math.round(Number(r.data.order?.subtotal) || 0);
+        if (r.status === 200 && Number(r.data.order.container_fee) === 500
+          && Number(r.data.order.payable) === sub + 500) {
+          pass('Para llevar → +$500 contenedor');
+        } else fail('Para llevar fee', JSON.stringify(r.data.order));
+
+        r = await req('POST', `/api/orders/${twOrderId}/send`, { cookie: meseroCookie, body: {} });
+        if (r.status !== 200) fail('Para llevar send', r.data.error);
+
+        const payAmt = sub + 500 + 50;
+        r = await req('POST', '/api/invoices', {
+          cookie: cajeroCookie,
+          body: {
+            order_id: twOrderId,
+            payments: [{ method: 'efectivo', amount: payAmt }],
+            discount: 0,
+            tip: 50
+          }
+        });
+        if (r.status === 200 && Number(r.data.invoice?.container_fee) === 500
+          && Number(r.data.invoice?.total) === payAmt) {
+          pass('Invoice para llevar incluye contenedor');
+        } else fail('Invoice container_fee', JSON.stringify({
+          status: r.status,
+          error: r.data.error,
+          fee: r.data.invoice?.container_fee,
+          total: r.data.invoice?.total,
+          expected: payAmt
+        }));
+
+        dbMod.setSetting('takeaway_fee_enabled', '0');
+        r = await req('POST', '/api/orders/takeaway', { cookie: meseroCookie, body: {} });
+        const tw2 = r.data.order?.id;
+        if (!tw2) fail('Para llevar off setup', r.data.error);
         else {
-          r = await req('POST', `/api/orders/${twOrderId}/items`, {
+          await req('POST', `/api/orders/${tw2}/items`, {
             cookie: meseroCookie,
             body: { product_id: productId, quantity: 1 }
           });
-          const sub = Math.round(Number(r.data.order?.subtotal) || 0);
-          r = await req('POST', `/api/orders/${twOrderId}/takeaway`, {
-            cookie: meseroCookie,
-            body: { takeaway: true }
-          });
+          r = await req('GET', `/api/orders/${tw2}`, { cookie: meseroCookie });
           if (r.status === 200 && r.data.order?.takeaway === true
-            && Number(r.data.order.container_fee) === 500
-            && Number(r.data.order.payable) === sub + 500) {
-            pass('POST takeaway → +$500 contenedor');
-          } else fail('POST takeaway fee', JSON.stringify(r.data.order));
+            && Number(r.data.order.container_fee) === 0) {
+            pass('Takeaway con cobro desactivado → fee 0');
+          } else fail('Takeaway fee off', JSON.stringify(r.data.order));
 
-          r = await req('POST', `/api/orders/${twOrderId}/send`, { cookie: meseroCookie, body: {} });
-          if (r.status !== 200) fail('Para llevar send', r.data.error);
-
-          const payAmt = sub + 500 + 50;
+          const sub2 = Math.round(Number(r.data.order?.subtotal) || 0);
+          await req('POST', `/api/orders/${tw2}/send`, { cookie: meseroCookie, body: {} });
           r = await req('POST', '/api/invoices', {
             cookie: cajeroCookie,
             body: {
-              order_id: twOrderId,
-              payments: [{ method: 'efectivo', amount: payAmt }],
+              order_id: tw2,
+              payments: [{ method: 'efectivo', amount: sub2 }],
               discount: 0,
-              tip: 50
+              tip: 0
             }
           });
-          if (r.status === 200 && Number(r.data.invoice?.container_fee) === 500
-            && Number(r.data.invoice?.total) === payAmt) {
-            pass('Invoice para llevar incluye contenedor');
-          } else fail('Invoice container_fee', JSON.stringify({
+          if (r.status === 200 && Number(r.data.invoice?.container_fee) === 0
+            && Number(r.data.invoice?.total) === sub2) {
+            pass('Invoice sin cobro de contenedor');
+          } else fail('Invoice fee off', JSON.stringify({
             status: r.status,
             error: r.data.error,
             fee: r.data.invoice?.container_fee,
-            total: r.data.invoice?.total,
-            expected: payAmt
+            total: r.data.invoice?.total
           }));
-
-          r = await req('GET', '/api/tables', { cookie: meseroCookie });
-          const free2 = (r.data.tables || []).find((t) => !t.order && !t.joined_to_id && t.status === 'free');
-          if (!free2) {
-            fail('Para llevar off setup', 'No hay segunda mesa libre');
-          } else {
-            dbMod.setSetting('takeaway_fee_enabled', '0');
-            r = await req('POST', '/api/orders', { cookie: meseroCookie, body: { table_id: free2.id } });
-            const tw2 = r.data.order?.id;
-            await req('POST', `/api/orders/${tw2}/items`, {
-              cookie: meseroCookie,
-              body: { product_id: productId, quantity: 1 }
-            });
-            r = await req('POST', `/api/orders/${tw2}/takeaway`, {
-              cookie: meseroCookie,
-              body: { takeaway: 1 }
-            });
-            if (r.status === 200 && r.data.order?.takeaway === true
-              && Number(r.data.order.container_fee) === 0) {
-              pass('Takeaway con cobro desactivado → fee 0');
-            } else fail('Takeaway fee off', JSON.stringify(r.data.order));
-
-            const sub2 = Math.round(Number(r.data.order?.subtotal) || 0);
-            await req('POST', `/api/orders/${tw2}/send`, { cookie: meseroCookie, body: {} });
-            r = await req('POST', '/api/invoices', {
-              cookie: cajeroCookie,
-              body: {
-                order_id: tw2,
-                payments: [{ method: 'efectivo', amount: sub2 }],
-                discount: 0,
-                tip: 0
-              }
-            });
-            if (r.status === 200 && Number(r.data.invoice?.container_fee) === 0
-              && Number(r.data.invoice?.total) === sub2) {
-              pass('Invoice sin cobro de contenedor');
-            } else fail('Invoice fee off', JSON.stringify({
-              status: r.status,
-              error: r.data.error,
-              fee: r.data.invoice?.container_fee,
-              total: r.data.invoice?.total
-            }));
-            dbMod.setSetting('takeaway_fee_enabled', '1');
-          }
+          dbMod.setSetting('takeaway_fee_enabled', '1');
         }
       }
     }

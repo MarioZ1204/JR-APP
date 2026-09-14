@@ -223,10 +223,24 @@ function escPosImageRaster(raster) {
   return Buffer.concat([header, data]);
 }
 
-function logoEscPos(widthMm) {
+function logoDotWidth(widthMm, size = 'md') {
+  const narrow = widthMm === 58;
+  if (size === 'sm') return narrow ? 120 : 160;
+  if (size === 'lg') return narrow ? 256 : 384;
+  return narrow ? 168 : 216;
+}
+
+function logoHtmlWidth(widthMm, size = 'md') {
+  const narrow = widthMm === 58;
+  if (size === 'sm') return narrow ? 64 : 80;
+  if (size === 'lg') return narrow ? 120 : 168;
+  return narrow ? 88 : 108;
+}
+
+function logoEscPos(widthMm, size = 'md') {
   const png = loadLogoAssets();
   if (!png) return Buffer.alloc(0);
-  const targetWidth = widthMm === 58 ? 256 : 384;
+  const targetWidth = logoDotWidth(widthMm, size);
   const raster = pngToRaster(png, targetWidth);
   return Buffer.concat([
     Buffer.from([0x1b, 0x40, 0x1b, 0x61, 0x01]),
@@ -236,10 +250,10 @@ function logoEscPos(widthMm) {
   ]);
 }
 
-function ticketLogoHtml(widthMm) {
+function ticketLogoHtml(widthMm, size = 'md') {
   const src = getLogoDataUrl();
   if (!src) return '';
-  const w = widthMm === 58 ? 120 : 168;
+  const w = logoHtmlWidth(widthMm, size);
   return `<div class="ticket-logo"><img src="${src}" alt="" width="${w}" /></div>`;
 }
 

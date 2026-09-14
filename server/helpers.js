@@ -70,7 +70,8 @@ function presentTable(t) {
     joined_to_id: joined,
     joined_to_name: t.joined_to_name ?? t.joined_to_name ?? null,
     pos_x: Number.isFinite(posX) ? posX : null,
-    pos_y: Number.isFinite(posY) ? posY : null
+    pos_y: Number.isFinite(posY) ? posY : null,
+    is_takeaway: Number(t.is_takeaway) === 1
   };
 }
 
@@ -115,15 +116,21 @@ function presentOrder(o) {
   const feeEnabled = getSetting('takeaway_fee_enabled', '1') === '1';
   const feeAmount = Math.max(0, Math.round(Number(getSetting('takeaway_fee_amount', '500')) || 0));
   const container_fee = takeaway && feeEnabled ? feeAmount : 0;
+  const combo = Number(o.combo) === 1;
+  const comboAmount = Math.max(0, Math.round(Number(getSetting('combo_amount', '6000')) || 0));
+  const combo_fee = combo ? comboAmount : 0;
   return {
     ...o,
     takeaway,
+    combo,
+    table_is_takeaway: Boolean(o.table_is_takeaway),
     table_name: o.table_name || o.table_name,
     waiter_name: o.waiter_name || o.waiter_name,
     items,
     subtotal,
     container_fee,
-    payable: Math.round(subtotal + container_fee)
+    combo_fee,
+    payable: Math.round(subtotal + container_fee + combo_fee)
   };
 }
 
@@ -156,7 +163,7 @@ function primaryTableId(tableId) {
 function orderWithItems(orderId) {
   const db = getDb();
   const order = db.prepare(`
-    SELECT o.*, t.name AS table_name, u.name AS waiter_name
+    SELECT o.*, t.name AS table_name, t.is_takeaway AS table_is_takeaway, u.name AS waiter_name
     FROM orders o
     JOIN restaurant_tables t ON t.id = o.table_id
     JOIN users u ON u.id = o.waiter_id
@@ -178,7 +185,48 @@ function orderWithItems(orderId) {
   const subtotal = items
     .filter((i) => i.status !== 'cancelled')
     .reduce((s, i) => s + i.quantity * i.unit_price, 0);
-  return presentOrder({ ...order, items, subtotal });
+  return presentOrder({
+    ...order,
+    table_is_takeaway: Number(order.table_is_takeaway) === 1,
+    items,
+    subtotal
+  });
+}
+
+function claimTakeawaySlot() {
+  const db = getDb();
+  const free = db.prepare(`
+    SELECT t.* FROM restaurant_tables t
+    WHERE t.is_takeaway = 1
+      AND t.joined_to_id IS NULL
+      AND t.status = 'free'
+      AND NOT EXISTS (
+        SELECT 1 FROM orders o
+        WHERE o.table_id = t.id AND o.status NOT IN ('billed','cancelled')
+      )
+    ORDER BY t.sort_order, t.id
+    LIMIT 1
+  `).get();
+  if (free) return free;
+
+  const n = db.prepare('SELECT COUNT(*) AS n FROM restaurant_tables WHERE is_takeaway = 1').get().n;
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order),0) AS n FROM restaurant_tables').get().n;
+  const name = `Para llevar ${n + 1}`;
+  const info = db.prepare(`
+    INSERT INTO restaurant_tables (name, seats, sort_order, pos_x, pos_y, is_takeaway, status)
+    VALUES (?, 0, ?, NULL, NULL, 1, 'free')
+  `).run(name, maxSort + 1);
+  return db.prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(info.lastInsertRowid);
+}
+
+function openTakeawayOrder(waiterId) {
+  const db = getDb();
+  const table = claimTakeawaySlot();
+  const info = db.prepare(
+    'INSERT INTO orders (table_id, waiter_id, status, takeaway) VALUES (?, ?, ?, 1)'
+  ).run(table.id, waiterId, 'open');
+  db.prepare("UPDATE restaurant_tables SET status = 'occupied' WHERE id = ?").run(table.id);
+  return orderWithItems(info.lastInsertRowid);
 }
 
 function syncOrderStatus(orderId) {
@@ -280,7 +328,10 @@ function tableList() {
         subtotal: full.subtotal,
         payable: full.payable,
         takeaway: full.takeaway,
+        combo: full.combo,
         container_fee: full.container_fee,
+        combo_fee: full.combo_fee,
+        payable: full.payable,
         item_count: full.items.filter((i) => i.status !== 'cancelled').length
       };
     }
@@ -310,5 +361,7 @@ module.exports = {
   nextFloorSlot,
   salonSnapshot,
   freeTableAndJoins,
-  cancelOpenOrder
+  cancelOpenOrder,
+  claimTakeawaySlot,
+  openTakeawayOrder
 };

@@ -81,6 +81,7 @@ function createSchema() {
       sort_order INTEGER NOT NULL DEFAULT 0,
       pos_x REAL,
       pos_y REAL,
+      is_takeaway INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
 
@@ -129,6 +130,8 @@ function createSchema() {
         CHECK(status IN ('open','sent','preparing','ready','delivered','billed','cancelled')),
       notes TEXT,
       takeaway INTEGER NOT NULL DEFAULT 0,
+      combo INTEGER NOT NULL DEFAULT 0,
+      combo_stock_taken INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
@@ -177,6 +180,7 @@ function createSchema() {
       tax REAL NOT NULL DEFAULT 0,
       total REAL NOT NULL,
       container_fee REAL NOT NULL DEFAULT 0,
+      combo_fee REAL NOT NULL DEFAULT 0,
       discount_label TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'paid' CHECK(status IN ('paid','cancelled')),
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
@@ -280,6 +284,10 @@ function migrateSchema() {
   if (!tableColsList.includes('pos_y')) {
     getDb().exec('ALTER TABLE restaurant_tables ADD COLUMN pos_y REAL');
   }
+  if (!tableColsList.includes('is_takeaway')) {
+    getDb().exec('ALTER TABLE restaurant_tables ADD COLUMN is_takeaway INTEGER NOT NULL DEFAULT 0');
+    tableColsList.push('is_takeaway');
+  }
   const invCols = tableCols('invoices');
   if (!invCols.includes('discount')) {
     getDb().exec('ALTER TABLE invoices ADD COLUMN discount REAL NOT NULL DEFAULT 0');
@@ -295,9 +303,22 @@ function migrateSchema() {
     getDb().exec("ALTER TABLE invoices ADD COLUMN discount_label TEXT NOT NULL DEFAULT ''");
     invCols.push('discount_label');
   }
+  if (!invCols.includes('combo_fee')) {
+    getDb().exec('ALTER TABLE invoices ADD COLUMN combo_fee REAL NOT NULL DEFAULT 0');
+    invCols.push('combo_fee');
+  }
   const orderCols = tableCols('orders');
   if (!orderCols.includes('takeaway')) {
     getDb().exec('ALTER TABLE orders ADD COLUMN takeaway INTEGER NOT NULL DEFAULT 0');
+    orderCols.push('takeaway');
+  }
+  if (!orderCols.includes('combo')) {
+    getDb().exec('ALTER TABLE orders ADD COLUMN combo INTEGER NOT NULL DEFAULT 0');
+    orderCols.push('combo');
+  }
+  if (!orderCols.includes('combo_stock_taken')) {
+    getDb().exec('ALTER TABLE orders ADD COLUMN combo_stock_taken INTEGER NOT NULL DEFAULT 0');
+    orderCols.push('combo_stock_taken');
   }
   const userCols = tableCols('users');
   if (!userCols.includes('must_change_password')) {
@@ -329,6 +350,21 @@ function migrateSchema() {
       const pos_y = Math.min(88, Math.max(8, 18 + (rowN % 5) * 16));
       getDb().prepare('UPDATE restaurant_tables SET pos_x = ?, pos_y = ? WHERE id = ?').run(pos_x, pos_y, row.id);
     });
+  }
+  ensureTakeawaySlots();
+}
+
+function ensureTakeawaySlots(min = 2) {
+  const db = getDb();
+  const n = db.prepare('SELECT COUNT(*) AS n FROM restaurant_tables WHERE is_takeaway = 1').get().n;
+  if (n >= min) return;
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order),0) AS n FROM restaurant_tables').get().n;
+  const ins = db.prepare(`
+    INSERT INTO restaurant_tables (name, seats, sort_order, pos_x, pos_y, is_takeaway, status)
+    VALUES (?, 0, ?, NULL, NULL, 1, 'free')
+  `);
+  for (let i = n + 1; i <= min; i++) {
+    ins.run(`Para llevar ${i}`, maxSort + i);
   }
 }
 
@@ -363,6 +399,7 @@ const DEFAULT_SETTINGS = {
   promo_tuesday_burgers: '1',
   takeaway_fee_enabled: '1',
   takeaway_fee_amount: '500',
+  combo_amount: '6000',
   ticket_footer: '¡Gracias por su visita!',
   session_secret: 'jr-local-' + Math.random().toString(36).slice(2),
   last_auto_backup: '',

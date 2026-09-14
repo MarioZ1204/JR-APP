@@ -4,7 +4,7 @@ const {
   requireAuth, requireRole, logChange, emit, openOrderForTable,
   refreshTableStatus, primaryTableId, orderWithItems, syncOrderStatus,
   currentRegister, tableList, salonSnapshot, cancelOpenOrder, freeTableAndJoins,
-  nextFloorSlot, presentTable
+  nextFloorSlot, presentTable, openTakeawayOrder
 } = require('./helpers');
 const inventory = require('./inventory');
 const { computeTuesdayBurgerPromo } = require('./promotions');
@@ -186,6 +186,7 @@ function mountApi(app) {
       promo_tuesday_burgers: s.promo_tuesday_burgers !== '0',
       takeaway_fee_enabled: s.takeaway_fee_enabled !== '0',
       takeaway_fee_amount: Math.max(0, Math.round(Number(s.takeaway_fee_amount != null ? s.takeaway_fee_amount : 500) || 0)),
+      combo_amount: Math.max(0, Math.round(Number(s.combo_amount != null ? s.combo_amount : 6000) || 0)),
       ticket_footer: s.ticket_footer || '',
       setup_completed: s.setup_completed === '1'
     };
@@ -243,8 +244,8 @@ function mountApi(app) {
     if (openOrderForTable(t.id) || t.joined_to_id) {
       return res.status(400).json({ error: 'No se puede quitar una mesa ocupada o juntada' });
     }
-    const n = db().prepare('SELECT COUNT(*) AS n FROM restaurant_tables').get().n;
-    if (n <= 1) return fail(res, 400, 'Tiene que quedar por lo menos una mesa');
+    const n = db().prepare('SELECT COUNT(*) AS n FROM restaurant_tables WHERE COALESCE(is_takeaway,0) = 0').get().n;
+    if (!Number(t.is_takeaway) && n <= 1) return fail(res, 400, 'Tiene que quedar por lo menos una mesa');
     const used = db().prepare('SELECT COUNT(*) AS n FROM orders WHERE table_id = ?').get(t.id).n;
     if (used) {
       return fail(res, 400, 'Esa mesa ya tuvo pedidos. No se puede borrar; cámbiele el nombre si ya no se usa.');
@@ -261,6 +262,7 @@ function mountApi(app) {
   app.post('/api/tables/:id/reserve', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
     const t = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(req.params.id);
     if (!t) return res.status(404).json({ error: 'Mesa no encontrada' });
+    if (Number(t.is_takeaway) === 1) return fail(res, 400, 'Para llevar no se reserva');
     if (t.status === 'occupied' || t.status === 'waiting_payment' || t.joined_to_id) {
       return res.status(400).json({ error: 'La mesa no está libre' });
     }
@@ -288,6 +290,9 @@ function mountApi(app) {
     const primary = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(req.params.id);
     const other = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(req.body.other_id);
     if (!primary || !other) return res.status(404).json({ error: 'Mesa no encontrada' });
+    if (Number(primary.is_takeaway) === 1 || Number(other.is_takeaway) === 1) {
+      return fail(res, 400, 'Para llevar no se junta con mesas');
+    }
     if (primary.id === other.id) return res.status(400).json({ error: 'Toque otra mesa' });
     if (primary.joined_to_id || other.joined_to_id) {
       return res.status(400).json({ error: 'Una de las mesas ya está juntada' });
@@ -321,8 +326,12 @@ function mountApi(app) {
 
   app.post('/api/tables/:id/transfer', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
     const fromId = primaryTableId(Number(req.params.id));
+    const from = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(fromId);
     const to = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(req.body.to_table_id);
     if (!to) return res.status(404).json({ error: 'No se encontró esa mesa' });
+    if (Number(from?.is_takeaway) === 1 || Number(to.is_takeaway) === 1) {
+      return fail(res, 400, 'Para llevar no se pasa a otra mesa');
+    }
     if (to.joined_to_id || to.status === 'occupied' || to.status === 'waiting_payment') {
       return res.status(400).json({ error: 'Esa mesa no está libre' });
     }
@@ -411,10 +420,41 @@ function mountApi(app) {
     res.json({ order: orderWithItems(order.id) });
   });
 
+  app.post('/api/orders/:id/combo', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
+    const order = db().prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order || ['billed', 'cancelled'].includes(order.status)) {
+      return res.status(400).json({ error: 'Este pedido ya está cerrado' });
+    }
+    const combo = req.body.combo === true || req.body.combo === 1 || req.body.combo === '1' ? 1 : 0;
+    try {
+      withTx(() => {
+        db().prepare(`
+          UPDATE orders SET combo = ?, updated_at = datetime('now','localtime') WHERE id = ?
+        `).run(combo, order.id);
+        const block = getSetting('block_on_no_stock', '1') === '1';
+        if (combo) {
+          inventory.consumeComboIfNeeded(order.id, req.user.id, { allowNegative: !block });
+        } else {
+          inventory.restoreComboIfNeeded(order.id, req.user.id);
+        }
+      });
+    } catch (e) {
+      if (e.shortages) return res.status(409).json({ error: e.message || 'No alcanza el ingrediente del combo', shortages: e.shortages });
+      return fail(res, e.http || 500, e.message || 'No se pudo actualizar el combo');
+    }
+    emit(req, 'orders:changed', { order_id: order.id });
+    emit(req, 'tables:changed', {});
+    emit(req, 'kitchen:changed', {});
+    res.json({ order: orderWithItems(order.id) });
+  });
+
   app.post('/api/orders', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
     const tableId = primaryTableId(Number(req.body.table_id));
     const table = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(tableId);
     if (!table) return res.status(404).json({ error: 'Mesa no encontrada' });
+    if (Number(table.is_takeaway) === 1) {
+      return fail(res, 400, 'Use el botón Para llevar');
+    }
     let order = openOrderForTable(tableId);
     if (!order) {
       const info = db().prepare(
@@ -425,6 +465,13 @@ function mountApi(app) {
     db().prepare("UPDATE restaurant_tables SET status = 'occupied' WHERE id = ?").run(tableId);
     emit(req, 'tables:changed', {});
     res.json({ order: orderWithItems(order.id) });
+  });
+
+  app.post('/api/orders/takeaway', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
+    const order = openTakeawayOrder(req.user.id);
+    emit(req, 'tables:changed', {});
+    emit(req, 'orders:changed', { order_id: order.id });
+    res.json({ order });
   });
 
   app.post('/api/orders/:id/items', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
@@ -595,6 +642,7 @@ function mountApi(app) {
           allowNegative: !block,
           reasonPrefix: 'Cocina'
         });
+        inventory.consumeComboIfNeeded(order.id, req.user.id, { allowNegative: !block });
         db().prepare(`UPDATE order_items SET sent = 1 WHERE order_id = ? AND sent = 0 AND status != 'cancelled'`)
           .run(order.id);
         syncOrderStatus(order.id);
@@ -1005,6 +1053,7 @@ function mountApi(app) {
 
         const subtotal = active.reduce((s, i) => s + i.quantity * i.unit_price, 0);
         const containerFee = Math.max(0, Math.round(Number(order.container_fee) || 0));
+        const comboFee = Math.max(0, Math.round(Number(order.combo_fee) || 0));
         const promo = computeTuesdayBurgerPromo(active);
         let discount;
         let discountLabel = '';
@@ -1030,7 +1079,7 @@ function mountApi(app) {
         } else if (taxRate > 0 && included) {
           tax = Math.round(base - base / (1 + taxRate / 100));
         }
-        total = Math.round(total + tip + containerFee);
+        total = Math.round(total + tip + containerFee + comboFee);
 
         if (given < Math.round(total)) {
           const err = new Error(`El pago (${given}) no cubre el total (${Math.round(total)})`);
@@ -1069,9 +1118,9 @@ function mountApi(app) {
 
         const nextNum = (db().prepare('SELECT COALESCE(MAX(number),0) AS n FROM invoices').get().n) + 1;
         const info = db().prepare(`
-          INSERT INTO invoices (number, order_id, table_id, cashier_id, register_id, subtotal, discount, tip, tax_rate, tax, total, container_fee, discount_label)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(nextNum, order.id, order.table_id, req.user.id, register.id, subtotal, discount, tip, taxRate, tax, total, containerFee, discountLabel);
+          INSERT INTO invoices (number, order_id, table_id, cashier_id, register_id, subtotal, discount, tip, tax_rate, tax, total, container_fee, combo_fee, discount_label)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(nextNum, order.id, order.table_id, req.user.id, register.id, subtotal, discount, tip, taxRate, tax, total, containerFee, comboFee, discountLabel);
 
         const insPay = db().prepare('INSERT INTO payments (invoice_id, method, amount) VALUES (?, ?, ?)');
         const insMove = db().prepare(`
@@ -1531,11 +1580,11 @@ function mountApi(app) {
 
     const tables = db().prepare(`
       SELECT
-        SUM(CASE WHEN status = 'free' AND joined_to_id IS NULL THEN 1 ELSE 0 END) AS free,
-        SUM(CASE WHEN status = 'occupied' OR joined_to_id IS NOT NULL THEN 1 ELSE 0 END) AS occupied,
+        SUM(CASE WHEN COALESCE(is_takeaway,0) = 0 AND status = 'free' AND joined_to_id IS NULL THEN 1 ELSE 0 END) AS free,
+        SUM(CASE WHEN COALESCE(is_takeaway,0) = 0 AND (status = 'occupied' OR joined_to_id IS NOT NULL) THEN 1 ELSE 0 END) AS occupied,
         SUM(CASE WHEN status = 'waiting_payment' THEN 1 ELSE 0 END) AS waiting_payment,
-        SUM(CASE WHEN status = 'reserved' THEN 1 ELSE 0 END) AS reserved,
-        COUNT(*) AS total
+        SUM(CASE WHEN COALESCE(is_takeaway,0) = 0 AND status = 'reserved' THEN 1 ELSE 0 END) AS reserved,
+        SUM(CASE WHEN COALESCE(is_takeaway,0) = 0 THEN 1 ELSE 0 END) AS total
       FROM restaurant_tables
     `).get();
 
@@ -1695,7 +1744,7 @@ function mountApi(app) {
     const allowed = [
       'business_name', 'business_tagline', 'business_nit', 'business_address', 'business_phone',
       'tax_rate', 'tax_included', 'printer_width', 'printer_name', 'printer_enabled',
-      'block_on_no_stock', 'promo_tuesday_burgers', 'takeaway_fee_enabled', 'takeaway_fee_amount', 'ticket_footer'
+      'block_on_no_stock', 'promo_tuesday_burgers', 'takeaway_fee_enabled', 'takeaway_fee_amount', 'combo_amount', 'ticket_footer'
     ];
     for (const key of allowed) {
       if (req.body[key] == null) continue;

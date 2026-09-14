@@ -224,6 +224,52 @@ function consumeOrder(orderId, userId, { allowNegative = false } = {}) {
     WHERE order_id = ? AND status != 'cancelled' AND COALESCE(stock_taken, 0) = 0
   `).all(orderId);
   consumeItems(items, userId, orderId, { allowNegative, reasonPrefix: 'Venta' });
+  consumeComboIfNeeded(orderId, userId, { allowNegative });
+}
+
+const COMBO_PAPAS_NAME = 'Porción de Papas';
+
+function comboVirtualItems() {
+  return [
+    { product_name: COMBO_PAPAS_NAME, quantity: 1, station: 'kitchen', notes: 'Combo' },
+    { product_name: 'Gaseosa 400ml', quantity: 1, station: 'bar', notes: 'Combo' }
+  ];
+}
+
+function consumeComboIfNeeded(orderId, userId, { allowNegative = false } = {}) {
+  const db = getDb();
+  const order = db.prepare('SELECT id, combo, combo_stock_taken FROM orders WHERE id = ?').get(orderId);
+  if (!order || Number(order.combo) !== 1 || Number(order.combo_stock_taken) === 1) return;
+  const papas = db.prepare("SELECT id, name FROM products WHERE name = ? AND active = 1").get(COMBO_PAPAS_NAME);
+  if (papas) {
+    consumeItems([{
+      id: null,
+      product_id: papas.id,
+      quantity: 1,
+      product_name: papas.name,
+      removed_json: '[]',
+      added_json: '[]',
+      stock_taken: 0
+    }], userId, orderId, { allowNegative, reasonPrefix: 'Combo' });
+  }
+  db.prepare('UPDATE orders SET combo_stock_taken = 1 WHERE id = ?').run(orderId);
+}
+
+function restoreComboIfNeeded(orderId, userId) {
+  const db = getDb();
+  const order = db.prepare('SELECT id, combo_stock_taken FROM orders WHERE id = ?').get(orderId);
+  if (!order || Number(order.combo_stock_taken) !== 1) return;
+  const papas = db.prepare('SELECT id, name FROM products WHERE name = ?').get(COMBO_PAPAS_NAME);
+  if (papas) {
+    restoreItemLines({
+      product_id: papas.id,
+      quantity: 1,
+      product_name: papas.name,
+      removed_json: '[]',
+      added_json: '[]'
+    }, userId, orderId, 'Quitar combo');
+  }
+  db.prepare('UPDATE orders SET combo_stock_taken = 0 WHERE id = ?').run(orderId);
 }
 
 function restoreItem(item, userId, orderId) {
@@ -246,6 +292,7 @@ function restoreOrder(orderId, userId) {
     restoreItemLines(it, userId, orderId, 'Anulación venta');
     db.prepare('UPDATE order_items SET stock_taken = 0 WHERE id = ?').run(it.id);
   }
+  restoreComboIfNeeded(orderId, userId);
 }
 
 function lowStock() {
@@ -266,7 +313,11 @@ module.exports = {
   moveStock,
   consumeItems,
   consumeOrder,
+  consumeComboIfNeeded,
+  restoreComboIfNeeded,
+  comboVirtualItems,
   restoreItem,
   restoreOrder,
-  lowStock
+  lowStock,
+  COMBO_PAPAS_NAME
 };
