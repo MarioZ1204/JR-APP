@@ -22,16 +22,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "producto.key" if not exist "data\product.key" (
-  echo ERROR: Falta la clave de producto.
-  echo En su PC de proveedor ejecute generar-clave.bat y copie
-  echo el archivo producto.key junto a este instalador.
-  echo.
-  pause
-  exit /b 1
-)
-
-echo [1/4] Dependencias...
+echo [1/3] Dependencias...
 if not exist "node_modules" (
   call npm install
   if errorlevel 1 (
@@ -43,22 +34,11 @@ if not exist "node_modules" (
   echo       Ya estaban instaladas.
 )
 
-echo [2/4] Activando clave de producto...
-if exist "producto.key" (
-  node scripts/apply-license.js --file producto.key
-) else (
-  node scripts/apply-license.js --file data\product.key
-)
-if errorlevel 1 (
-  echo No se pudo aplicar la clave.
-  pause
-  exit /b 1
-)
-
-echo [3/4] ¿Dejar el sistema limpio para el local? (borra ventas/caja, conserva menu)
+echo [2/3] ¿Dejar el sistema limpio para el local? (borra ventas/caja, conserva menu)
 choice /C SN /M "Instalacion limpia"
 if errorlevel 2 goto skip_reset
 if errorlevel 1 (
+  if not exist "node_modules" call npm install
   node scripts/factory-reset.js --confirm INSTALAR
   if errorlevel 1 (
     echo Aviso: no se completo la limpieza.
@@ -66,7 +46,7 @@ if errorlevel 1 (
 )
 :skip_reset
 
-echo [4/4] Acceso directo...
+echo [3/3] Acceso directo...
 set "SHORTCUT=%USERPROFILE%\Desktop\JR Sistema.lnk"
 powershell -NoProfile -Command ^
   "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%SHORTCUT%');" ^
@@ -82,7 +62,5 @@ echo  ========================================
 echo.
 echo  Use el acceso directo "JR Sistema" o ejecute iniciar.bat
 echo  Entrada tipica: usuario admin (cambie la contraseña al entrar)
-echo.
-echo  El personal del restaurante NO ve pantallas de licencia.
 echo.
 pause

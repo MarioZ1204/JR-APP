@@ -2,11 +2,8 @@ node_modules/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/logo-print.png
 data/smoke-test-run/
-data/product.key
-data/rental.lock
-producto.key
-product.key
 backups/
 capturas*/
 *.log

@@ -113,21 +113,21 @@ const SHAPE_PHOTO = {
 function ingSrc(kind) {
   const k = kind || 'extra';
   if (k === 'hotdog-bun') {
-    const path = '/icons/cats/perro.webp?v=64';
+    const path = '/icons/cats/perro.webp?v=71';
     return { path, fallback: path };
   }
   return {
-    path: `/icons/ings/${k}.webp?v=64`,
-    fallback: `/icons/ings/extra.webp?v=64`
+    path: `/icons/ings/${k}.webp?v=71`,
+    fallback: `/icons/ings/extra.webp?v=71`
   };
 }
 
 function dishPhoto(shape, p) {
   const cat = fold(p?.category_name || '');
-  if (/bebida/.test(cat)) return '/icons/cats/bebida.webp?v=64';
-  if (/adicional/.test(cat)) return '/icons/cats/adicional.webp?v=64';
+  if (/bebida/.test(cat)) return '/icons/cats/bebida.webp?v=71';
+  if (/adicional/.test(cat)) return '/icons/cats/adicional.webp?v=71';
   const key = SHAPE_PHOTO[shape] || 'especial';
-  return `/icons/cats/${key}.webp?v=64`;
+  return `/icons/cats/${key}.webp?v=71`;
 }
 
 const SKIP_KINDS = new Set(['ketchup', 'mustard', 'mayo', 'ranch', 'bbq', 'cream', 'sauce', 'honey', 'garlic']);
@@ -200,7 +200,7 @@ export function burgerPickerHtml(p, choosable, esc, allIngredients = []) {
     ? `<div class="ing-toggle-block" data-list="remove">
         <div class="ing-sec-head">
           <span class="ing-sec-label">Puede quitar</span>
-          <input type="search" class="ing-search" data-filter="remove" placeholder="Buscar…" autocomplete="off" />
+          <input type="search" class="ing-search" data-filter="remove" placeholder="Buscar⬦" autocomplete="off" />
         </div>
         <div class="ing-chips" data-chips="remove">${toggles.map((r) => chipBtn(r, 'remove')).join('')}</div>
       </div>`
@@ -210,7 +210,7 @@ export function burgerPickerHtml(p, choosable, esc, allIngredients = []) {
     ? `<div class="ing-toggle-block" data-list="add">
         <div class="ing-sec-head">
           <span class="ing-sec-label">Puede añadir</span>
-          <input type="search" class="ing-search" data-filter="add" placeholder="Buscar…" autocomplete="off" />
+          <input type="search" class="ing-search" data-filter="add" placeholder="Buscar⬦" autocomplete="off" />
         </div>
         <div class="ing-chips" data-chips="add">${addable.map((i) => chipBtn({ id: i.id, name: i.name }, 'add')).join('')}</div>
       </div>`

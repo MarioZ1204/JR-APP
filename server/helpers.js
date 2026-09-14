@@ -1,5 +1,4 @@
 const { getDb, publicUser } = require('./db');
-const { publicLicense } = require('./license');
 
 function requireAuth(req, res, next) {
   if (!req.session || !req.session.user) {
@@ -11,7 +10,6 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Su sesión se cerró. Entre de nuevo' });
   }
   req.user = publicUser(user);
-  req.license = publicLicense();
 
   const path = String(req.path || '');
   const method = String(req.method || 'GET').toUpperCase();
@@ -23,19 +21,6 @@ function requireAuth(req, res, next) {
     return res.status(403).json({
       error: 'Debe cambiar su contraseña antes de continuar',
       code: 'MUST_CHANGE'
-    });
-  }
-
-  const allowWhileExpired =
-    method === 'GET' ||
-    path === '/api/logout' ||
-    path === '/api/password';
-
-  if (req.license.expired && method !== 'GET' && !allowWhileExpired) {
-    return res.status(402).json({
-      error: 'El servicio de este sistema venció. Contacte a su proveedor.',
-      code: 'LICENSE_EXPIRED',
-      license: req.license
     });
   }
 
@@ -121,16 +106,24 @@ function presentItem(i) {
 
 function presentOrder(o) {
   if (!o) return o;
+  const { getSetting } = require('./db');
   const items = (o.items || []).map(presentItem);
   const subtotal = o.subtotal != null ? o.subtotal : items
     .filter((i) => i.status !== 'cancelled')
     .reduce((s, i) => s + i.quantity * (i.unit_price ?? i.unit_price ?? 0), 0);
+  const takeaway = Number(o.takeaway) === 1;
+  const feeEnabled = getSetting('takeaway_fee_enabled', '1') === '1';
+  const feeAmount = Math.max(0, Math.round(Number(getSetting('takeaway_fee_amount', '500')) || 0));
+  const container_fee = takeaway && feeEnabled ? feeAmount : 0;
   return {
     ...o,
+    takeaway,
     table_name: o.table_name || o.table_name,
     waiter_name: o.waiter_name || o.waiter_name,
     items,
-    subtotal
+    subtotal,
+    container_fee,
+    payable: Math.round(subtotal + container_fee)
   };
 }
 
@@ -242,11 +235,12 @@ function freeTableAndJoins(tableId) {
 
 function cancelOpenOrder(orderId, userId, reason) {
   const db = getDb();
+  const inventory = require('./inventory');
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order || ['billed', 'cancelled'].includes(order.status)) return null;
   const why = String(reason || 'Cuenta cancelada');
   const items = db.prepare(
-    "SELECT id FROM order_items WHERE order_id = ? AND status != 'cancelled'"
+    "SELECT * FROM order_items WHERE order_id = ? AND status != 'cancelled'"
   ).all(orderId);
   const upd = db.prepare(`
     UPDATE order_items
@@ -254,6 +248,7 @@ function cancelOpenOrder(orderId, userId, reason) {
     WHERE id = ?
   `);
   for (const it of items) {
+    inventory.restoreItem(it, userId, orderId);
     upd.run(userId, why, it.id);
     logChange(it.id, userId, 'cancel', { reason: why, order: true });
   }
@@ -283,6 +278,9 @@ function tableList() {
         status: full.status,
         waiter_name: full.waiter_name,
         subtotal: full.subtotal,
+        payable: full.payable,
+        takeaway: full.takeaway,
+        container_fee: full.container_fee,
         item_count: full.items.filter((i) => i.status !== 'cancelled').length
       };
     }

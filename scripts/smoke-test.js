@@ -51,9 +51,6 @@ async function startServer() {
 
   const dbMod = require('../server/db');
   dbMod.init();
-
-  const { installProductKey, generateKey } = require('../server/license');
-  installProductKey(generateKey('Smoke Test', '2099-12-31'), { persistFile: false, rental: false });
   dbMod.getDb().prepare('UPDATE users SET must_change_password = 0').run();
 
   const { mountApi } = require('../server/api');
@@ -284,6 +281,114 @@ async function runTests(ctx) {
     if (r.status === 403) pass('Mesero no accede al panel → 403');
     else fail('Permiso panel mesero', `esperaba 403, got ${r.status}`);
 
+    // Para llevar + contenedor (antes de cerrar caja)
+    {
+      const dbMod = require('../server/db');
+      dbMod.setSetting('takeaway_fee_enabled', '1');
+      dbMod.setSetting('takeaway_fee_amount', '500');
+
+      r = await req('GET', '/api/settings', { cookie: adminCookie });
+      if (r.status === 200 && r.data.settings?.takeaway_fee_enabled === true
+        && Number(r.data.settings.takeaway_fee_amount) === 500) {
+        pass('Settings: takeaway_fee expuesto');
+      } else fail('Settings takeaway_fee', JSON.stringify(r.data.settings));
+
+      r = await req('GET', '/api/tables', { cookie: meseroCookie });
+      const free = (r.data.tables || []).find((t) => !t.order && !t.joined_to_id && t.status === 'free');
+      const twTable = free?.id || (r.data.tables || []).find((t) => !t.joined_to_id)?.id;
+      if (!twTable) {
+        fail('Para llevar setup', 'No hay mesa disponible');
+      } else {
+        r = await req('POST', '/api/orders', { cookie: meseroCookie, body: { table_id: twTable } });
+        const twOrderId = r.data.order?.id;
+        if (!twOrderId) fail('Para llevar abrir pedido', r.data.error);
+        else {
+          r = await req('POST', `/api/orders/${twOrderId}/items`, {
+            cookie: meseroCookie,
+            body: { product_id: productId, quantity: 1 }
+          });
+          const sub = Math.round(Number(r.data.order?.subtotal) || 0);
+          r = await req('POST', `/api/orders/${twOrderId}/takeaway`, {
+            cookie: meseroCookie,
+            body: { takeaway: true }
+          });
+          if (r.status === 200 && r.data.order?.takeaway === true
+            && Number(r.data.order.container_fee) === 500
+            && Number(r.data.order.payable) === sub + 500) {
+            pass('POST takeaway → +$500 contenedor');
+          } else fail('POST takeaway fee', JSON.stringify(r.data.order));
+
+          r = await req('POST', `/api/orders/${twOrderId}/send`, { cookie: meseroCookie, body: {} });
+          if (r.status !== 200) fail('Para llevar send', r.data.error);
+
+          const payAmt = sub + 500 + 50;
+          r = await req('POST', '/api/invoices', {
+            cookie: cajeroCookie,
+            body: {
+              order_id: twOrderId,
+              payments: [{ method: 'efectivo', amount: payAmt }],
+              discount: 0,
+              tip: 50
+            }
+          });
+          if (r.status === 200 && Number(r.data.invoice?.container_fee) === 500
+            && Number(r.data.invoice?.total) === payAmt) {
+            pass('Invoice para llevar incluye contenedor');
+          } else fail('Invoice container_fee', JSON.stringify({
+            status: r.status,
+            error: r.data.error,
+            fee: r.data.invoice?.container_fee,
+            total: r.data.invoice?.total,
+            expected: payAmt
+          }));
+
+          r = await req('GET', '/api/tables', { cookie: meseroCookie });
+          const free2 = (r.data.tables || []).find((t) => !t.order && !t.joined_to_id && t.status === 'free');
+          if (!free2) {
+            fail('Para llevar off setup', 'No hay segunda mesa libre');
+          } else {
+            dbMod.setSetting('takeaway_fee_enabled', '0');
+            r = await req('POST', '/api/orders', { cookie: meseroCookie, body: { table_id: free2.id } });
+            const tw2 = r.data.order?.id;
+            await req('POST', `/api/orders/${tw2}/items`, {
+              cookie: meseroCookie,
+              body: { product_id: productId, quantity: 1 }
+            });
+            r = await req('POST', `/api/orders/${tw2}/takeaway`, {
+              cookie: meseroCookie,
+              body: { takeaway: 1 }
+            });
+            if (r.status === 200 && r.data.order?.takeaway === true
+              && Number(r.data.order.container_fee) === 0) {
+              pass('Takeaway con cobro desactivado → fee 0');
+            } else fail('Takeaway fee off', JSON.stringify(r.data.order));
+
+            const sub2 = Math.round(Number(r.data.order?.subtotal) || 0);
+            await req('POST', `/api/orders/${tw2}/send`, { cookie: meseroCookie, body: {} });
+            r = await req('POST', '/api/invoices', {
+              cookie: cajeroCookie,
+              body: {
+                order_id: tw2,
+                payments: [{ method: 'efectivo', amount: sub2 }],
+                discount: 0,
+                tip: 0
+              }
+            });
+            if (r.status === 200 && Number(r.data.invoice?.container_fee) === 0
+              && Number(r.data.invoice?.total) === sub2) {
+              pass('Invoice sin cobro de contenedor');
+            } else fail('Invoice fee off', JSON.stringify({
+              status: r.status,
+              error: r.data.error,
+              fee: r.data.invoice?.container_fee,
+              total: r.data.invoice?.total
+            }));
+            dbMod.setSetting('takeaway_fee_enabled', '1');
+          }
+        }
+      }
+    }
+
     r = await req('POST', '/api/cash/close', {
       cookie: cajeroCookie,
       body: { counted_cash: 100000, notes: 'Cierre smoke test', force: true }
@@ -295,11 +400,59 @@ async function runTests(ctx) {
     if (r.status === 200 && r.data.history?.length >= 1) pass('GET /api/cash/history');
     else fail('GET /api/cash/history', r.data.error);
 
-    // Licencia (scripts)
-    const { generateKey, parseKey, installProductKey } = require('../server/license');
-    const key = generateKey('Smoke Cliente', '2027-12-31');
-    if (parseKey(key)) pass('Generar y validar clave de producto');
-    else fail('Clave de producto', 'parseKey falló');
+    // Promo martes (motor con fecha inyectada)
+    {
+      const dbMod = require('../server/db');
+      const { computeTuesdayBurgerPromo } = require('../server/promotions');
+      const db = dbMod.getDb();
+      const burgers = db.prepare(`
+        SELECT p.id, p.price FROM products p
+        JOIN categories c ON c.id = p.category_id
+        WHERE LOWER(TRIM(c.name)) = 'hamburguesas' AND p.active = 1
+        ORDER BY p.price ASC, p.id ASC LIMIT 2
+      `).all();
+      if (burgers.length < 2) {
+        fail('Promo martes setup', 'Faltan hamburguesas en el catálogo');
+      } else {
+        const cheap = Math.round(Number(burgers[0].price));
+        const pricey = Math.round(Number(burgers[1].price));
+        const tuesday = new Date(2026, 8, 15, 12, 0, 0); // 15-sep-2026 = martes
+        const monday = new Date(2026, 8, 14, 12, 0, 0);
+        const twoBurgers = [
+          { product_id: burgers[0].id, unit_price: cheap, quantity: 1, status: 'pending' },
+          { product_id: burgers[1].id, unit_price: pricey, quantity: 1, status: 'ready' }
+        ];
+        const expectDisc = Math.round(cheap * 0.5);
+        let promo = computeTuesdayBurgerPromo(twoBurgers, tuesday);
+        if (promo.applied && promo.discount === expectDisc) pass('Promo martes: 2 burgers → 50% la más barata');
+        else fail('Promo martes 2 burgers', JSON.stringify(promo));
+
+        promo = computeTuesdayBurgerPromo(
+          [{ product_id: burgers[0].id, unit_price: cheap, quantity: 1, status: 'pending' }],
+          tuesday
+        );
+        if (!promo.applied && promo.discount === 0) pass('Promo martes: 1 burger → sin descuento');
+        else fail('Promo martes 1 burger', JSON.stringify(promo));
+
+        promo = computeTuesdayBurgerPromo(twoBurgers, monday);
+        if (!promo.applied && promo.reason === 'weekday') pass('Promo martes: lunes → no aplica');
+        else fail('Promo martes weekday', JSON.stringify(promo));
+
+        dbMod.setSetting('promo_tuesday_burgers', '0');
+        promo = computeTuesdayBurgerPromo(twoBurgers, tuesday);
+        if (!promo.applied && promo.reason === 'off') pass('Promo martes: desactivada → no aplica');
+        else fail('Promo martes off', JSON.stringify(promo));
+        dbMod.setSetting('promo_tuesday_burgers', '1');
+
+        const qty2 = [
+          { product_id: burgers[1].id, unit_price: pricey, quantity: 2, status: 'pending' }
+        ];
+        promo = computeTuesdayBurgerPromo(qty2, tuesday);
+        if (promo.applied && promo.discount === Math.round(pricey * 0.5)) {
+          pass('Promo martes: quantity 2 misma hamburguesa');
+        } else fail('Promo martes qty2', JSON.stringify(promo));
+      }
+    }
 
     r = await req('POST', '/api/logout', { cookie: adminCookie, body: {} });
     if (r.status === 200) pass('POST /api/logout');

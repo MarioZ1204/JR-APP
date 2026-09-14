@@ -2,9 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
-// Este módulo decodifica PNG a mano, así que el logo del ticket tiene que ser
-// PNG. Los candidatos se generan con scripts/optimizar-assets.py.
-const LOGO_CANDIDATES = [
+const DATA_DIR = process.env.JR_DATA_DIR || path.join(__dirname, '..', 'data');
+
+// Este módulo decodifica PNG a mano, así que el logo del ticket tiene que ser PNG.
+const CUSTOM_LOGO = () => path.join(DATA_DIR, 'logo-print.png');
+
+const DEFAULT_CANDIDATES = [
   path.join(__dirname, '..', 'public', 'logo-print.png'),
   path.join(__dirname, '..', 'public', 'icon-512.png'),
   path.join(__dirname, '..', 'public', 'logo-256.png'),
@@ -13,6 +16,7 @@ const LOGO_CANDIDATES = [
 
 let logoRgba = null;
 let logoDataUrl = null;
+let logoSource = null;
 
 function readChunk(buf, offset) {
   const len = buf.readUInt32BE(offset);
@@ -56,9 +60,8 @@ function unfilter(raw, width, height, bpp) {
 
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-function decodePngRgba(filePath) {
-  const buf = fs.readFileSync(filePath);
-  if (buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIG)) return null;
+function decodePngRgbaFromBuffer(buf) {
+  if (!buf || buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIG)) return null;
   let width = 0;
   let height = 0;
   let bitDepth = 0;
@@ -93,13 +96,31 @@ function decodePngRgba(filePath) {
   return { width, height, data: rgba };
 }
 
+function decodePngRgba(filePath) {
+  return decodePngRgbaFromBuffer(fs.readFileSync(filePath));
+}
+
+function clearLogoCache() {
+  logoRgba = null;
+  logoDataUrl = null;
+  logoSource = null;
+}
+
+function resolveLogoFile() {
+  const custom = CUSTOM_LOGO();
+  if (fs.existsSync(custom)) return { file: custom, custom: true };
+  const file = DEFAULT_CANDIDATES.find((p) => fs.existsSync(p));
+  return file ? { file, custom: false } : null;
+}
+
 function loadLogoAssets() {
   if (logoRgba) return logoRgba;
-  const file = LOGO_CANDIDATES.find((p) => fs.existsSync(p));
-  if (!file) return null;
-  logoRgba = decodePngRgba(file);
+  const found = resolveLogoFile();
+  if (!found) return null;
+  logoRgba = decodePngRgba(found.file);
   if (logoRgba) {
-    logoDataUrl = `data:image/png;base64,${fs.readFileSync(file).toString('base64')}`;
+    logoDataUrl = `data:image/png;base64,${fs.readFileSync(found.file).toString('base64')}`;
+    logoSource = found;
   }
   return logoRgba;
 }
@@ -107,6 +128,63 @@ function loadLogoAssets() {
 function getLogoDataUrl() {
   loadLogoAssets();
   return logoDataUrl;
+}
+
+function hasCustomLogo() {
+  return fs.existsSync(CUSTOM_LOGO());
+}
+
+function logoInfo() {
+  loadLogoAssets();
+  const found = resolveLogoFile();
+  return {
+    has_logo: Boolean(logoRgba),
+    custom: Boolean(found?.custom),
+    preview_url: found ? `/api/receipt-logo?t=${fs.statSync(found.file).mtimeMs}` : null,
+    width: logoRgba?.width || null,
+    height: logoRgba?.height || null
+  };
+}
+
+function saveCustomLogo(pngBuffer) {
+  if (!Buffer.isBuffer(pngBuffer) || pngBuffer.length < 24) {
+    const err = new Error('Archivo de imagen inválido');
+    err.http = 400;
+    throw err;
+  }
+  if (!pngBuffer.subarray(0, 8).equals(PNG_SIG)) {
+    const err = new Error('El logo debe ser PNG (use PNG o convierta la imagen)');
+    err.http = 400;
+    throw err;
+  }
+  const decoded = decodePngRgbaFromBuffer(pngBuffer);
+  if (!decoded) {
+    const err = new Error('No se pudo leer el PNG. Use PNG de 8 bits (RGB o RGBA).');
+    err.http = 400;
+    throw err;
+  }
+  if (pngBuffer.length > 2.5 * 1024 * 1024) {
+    const err = new Error('La imagen es muy pesada (máx. 2,5 MB)');
+    err.http = 400;
+    throw err;
+  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(CUSTOM_LOGO(), pngBuffer);
+  clearLogoCache();
+  return logoInfo();
+}
+
+function removeCustomLogo() {
+  const custom = CUSTOM_LOGO();
+  if (fs.existsSync(custom)) fs.unlinkSync(custom);
+  clearLogoCache();
+  return logoInfo();
+}
+
+function readCustomLogoFile() {
+  const found = resolveLogoFile();
+  if (!found) return null;
+  return { buffer: fs.readFileSync(found.file), mtimeMs: fs.statSync(found.file).mtimeMs };
 }
 
 function pngToRaster(png, targetWidth) {
@@ -168,5 +246,11 @@ function ticketLogoHtml(widthMm) {
 module.exports = {
   getLogoDataUrl,
   logoEscPos,
-  ticketLogoHtml
+  ticketLogoHtml,
+  clearLogoCache,
+  hasCustomLogo,
+  logoInfo,
+  saveCustomLogo,
+  removeCustomLogo,
+  readCustomLogoFile
 };

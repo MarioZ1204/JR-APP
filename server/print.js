@@ -102,7 +102,7 @@ function ascii(text) {
 function invoicePayload(invoiceId) {
   const db = getDb();
   const inv = db.prepare(`
-    SELECT i.*, t.name AS table_name, u.name AS cashier_name, o.id AS order_id
+    SELECT i.*, t.name AS table_name, u.name AS cashier_name, o.id AS order_id, o.takeaway AS order_takeaway
     FROM invoices i
     JOIN restaurant_tables t ON t.id = i.table_id
     JOIN users u ON u.id = i.cashier_id
@@ -129,17 +129,15 @@ function ticketLines(payload) {
   const lines = [];
   const push = (s) => lines.push(s);
 
-  push(getSetting('business_name', 'JR Burger'));
-  const nit = getSetting('business_nit', '');
   const address = getSetting('business_address', '');
   const phone = getSetting('business_phone', '');
-  if (nit) push('NIT ' + nit);
   if (address) wrap(address, cols).forEach(push);
-  if (phone) push(phone);
+  if (phone) wrap('Telefono para domicilios: ' + phone, cols).forEach(push);
   push('-'.repeat(cols));
   push(`Ticket #${String(inv.number).padStart(5, '0')}`);
   push(`Fecha: ${inv.created_at}`);
   push(`Mesa: ${inv.table_name}`);
+  if (Number(inv.container_fee) > 0 || Number(inv.order_takeaway) === 1) push('Para llevar');
   push(`Cajero: ${inv.cashier_name}`);
   push('-'.repeat(cols));
   for (const it of items) {
@@ -149,8 +147,11 @@ function ticketLines(payload) {
   }
   push('-'.repeat(cols));
   push(pad('Subtotal', money(inv.subtotal), cols));
-  if (Number(inv.discount) > 0) push(pad('Descuento', '-' + money(inv.discount), cols));
-  if (Number(inv.tax) > 0) push(pad(`IVA ${inv.tax_rate}%`, money(inv.tax), cols));
+  if (Number(inv.discount) > 0) {
+    const dLabel = String(inv.discount_label || '').trim() || 'Descuento';
+    push(pad(dLabel, '-' + money(inv.discount), cols));
+  }
+  if (Number(inv.container_fee) > 0) push(pad('Contenedor', money(inv.container_fee), cols));
   if (Number(inv.tip) > 0) push(pad('Propina', money(inv.tip), cols));
   push(pad('TOTAL', money(inv.total), cols));
   push('-'.repeat(cols));
@@ -185,15 +186,14 @@ function buildEscPos(payload) {
   return Buffer.concat(chunks);
 }
 
-function ticketHtml(payload) {
+function ticketHtml(payload, opts = {}) {
   const { inv, items, payments } = payload;
-  const widthMm = Number(getSetting('printer_width', '80')) === 58 ? 58 : 80;
-  const name = getSetting('business_name', 'JR Burger');
-  const nit = getSetting('business_nit', '');
-  const address = getSetting('business_address', '');
-  const phone = getSetting('business_phone', '');
-  const footer = getSetting('ticket_footer', '¡Gracias por su visita!');
+  const widthMm = Number(opts.printer_width != null ? opts.printer_width : getSetting('printer_width', '80')) === 58 ? 58 : 80;
+  const address = opts.business_address != null ? String(opts.business_address) : getSetting('business_address', '');
+  const phone = opts.business_phone != null ? String(opts.business_phone) : getSetting('business_phone', '');
+  const footer = opts.ticket_footer != null ? String(opts.ticket_footer) : getSetting('ticket_footer', '¡Gracias por su visita!');
   const methodLabel = (m) => (m === 'efectivo' ? 'Efectivo' : m === 'nequi' ? 'Nequi' : 'Daviplata');
+  const discountLabel = String(inv.discount_label || '').trim() || 'Descuento';
 
   const rows = items.map((it) => `
     <tr>
@@ -204,26 +204,30 @@ function ticketHtml(payload) {
   const pays = payments.map((p) => `
     <tr><td>${methodLabel(p.method)}</td><td class="r">${money(p.amount)}</td></tr>`).join('');
 
+  const headerBits = [];
+  if (address) headerBits.push(escapeHtml(address));
+  if (phone) headerBits.push('Teléfono para domicilios: ' + escapeHtml(phone));
+
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <title>Ticket ${inv.number}</title>
 <style>${printPageStyle(widthMm)}</style></head>
 <body>
   ${ticketLogoHtml(widthMm)}
-  <h1>${escapeHtml(name)}</h1>
-  <div class="c muted">${nit ? 'NIT ' + escapeHtml(nit) + '<br>' : ''}${escapeHtml(address)}${phone ? '<br>' + escapeHtml(phone) : ''}</div>
+  ${headerBits.length ? `<div class="c muted">${headerBits.join('<br>')}</div>` : ''}
   <hr>
   <div>Ticket #${String(inv.number).padStart(5, '0')}</div>
   <div>Fecha: ${escapeHtml(inv.created_at)}</div>
   <div>Mesa: ${escapeHtml(inv.table_name)}</div>
+  ${Number(inv.container_fee) > 0 || Number(inv.order_takeaway) === 1 ? '<div><b>Para llevar</b></div>' : ''}
   <div>Cajero: ${escapeHtml(inv.cashier_name)}</div>
   <hr>
   <table>${rows}</table>
   <hr>
   <table>
     <tr><td>Subtotal</td><td class="r">${money(inv.subtotal)}</td></tr>
-    ${Number(inv.discount) > 0 ? `<tr><td>Descuento</td><td class="r">-${money(inv.discount)}</td></tr>` : ''}
-    ${Number(inv.tax) > 0 ? `<tr><td>IVA ${inv.tax_rate}%</td><td class="r">${money(inv.tax)}</td></tr>` : ''}
+    ${Number(inv.discount) > 0 ? `<tr><td>${escapeHtml(discountLabel)}</td><td class="r">-${money(inv.discount)}</td></tr>` : ''}
+    ${Number(inv.container_fee) > 0 ? `<tr><td>Contenedor</td><td class="r">${money(inv.container_fee)}</td></tr>` : ''}
     ${Number(inv.tip) > 0 ? `<tr><td>Propina</td><td class="r">${money(inv.tip)}</td></tr>` : ''}
     <tr class="total"><td>TOTAL</td><td class="r">${money(inv.total)}</td></tr>
   </table>
@@ -233,6 +237,51 @@ function ticketHtml(payload) {
   <hr>
   <p class="c">${escapeHtml(footer)}</p>
 </body></html>`;
+}
+
+function sampleReceiptPayload() {
+  const feeEnabled = getSetting('takeaway_fee_enabled', '1') !== '0';
+  const feeAmount = Math.max(0, Math.round(Number(getSetting('takeaway_fee_amount', '500')) || 0));
+  const containerFee = feeEnabled ? feeAmount : 0;
+  const subtotal = 28000;
+  const discount = 6000;
+  const total = subtotal - discount + containerFee;
+  const when = new Date().toLocaleString('es-CO', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  return {
+    inv: {
+      number: 1,
+      created_at: when,
+      table_name: 'Mesa 1',
+      cashier_name: 'Cajero',
+      subtotal,
+      discount,
+      discount_label: '2da hamburguesa al 50%',
+      container_fee: containerFee,
+      order_takeaway: 1,
+      tip: 0,
+      total
+    },
+    items: [
+      { quantity: 2, product_name: 'Hamburguesa clasica', unit_price: 12000, notes: '', removed_json: '[]', added_json: '[]' },
+      { quantity: 1, product_name: 'Gaseosa 400 ml', unit_price: 4000, notes: '', removed_json: '[]', added_json: '[]' }
+    ],
+    payments: [{ method: 'efectivo', amount: total }],
+    change: 0
+  };
+}
+
+function receiptPreviewHtml(opts = {}) {
+  const widthMm = Number(opts.printer_width != null ? opts.printer_width : getSetting('printer_width', '80')) === 58 ? 58 : 80;
+  const html = ticketHtml(sampleReceiptPayload(), {
+    printer_width: widthMm,
+    business_address: opts.business_address,
+    business_phone: opts.business_phone,
+    ticket_footer: opts.ticket_footer
+  });
+  return { html, widthMm };
 }
 
 function escapeHtml(s) {
@@ -251,6 +300,7 @@ function kitchenPayload(order, items, stationLabel, extraRound) {
   push(name);
   push('*** ' + stationLabel + ' ***');
   push(order.table_name || 'Mesa');
+  if (Number(order.takeaway) === 1) push('*** PARA LLEVAR ***');
   if (extraRound) push('*** NUEVO ***');
   push('-'.repeat(cols));
   push('Pedido #' + order.id);
@@ -279,6 +329,7 @@ function buildKitchenEscPos(payload) {
   chunks.push(Buffer.from('*** ' + ascii(stationLabel) + ' ***\n', 'latin1'));
   chunks.push(Buffer.from(ascii(order.table_name || 'Mesa') + '\n', 'latin1'));
   chunks.push(Buffer.from([0x1b, 0x45, 0x00]));
+  if (Number(order.takeaway) === 1) chunks.push(Buffer.from('*** PARA LLEVAR ***\n', 'latin1'));
   if (extraRound) chunks.push(Buffer.from('*** NUEVO ***\n', 'latin1'));
   chunks.push(Buffer.from([0x1b, 0x61, 0x00]));
   chunks.push(Buffer.from(dash + '\n', 'latin1'));
@@ -327,6 +378,7 @@ function kitchenHtml(payload) {
   <h1>${escapeHtml(name)}</h1>
   <div class="c">*** ${escapeHtml(stationLabel)} ***</div>
   <h2>${escapeHtml(order.table_name || 'Mesa')}</h2>
+  ${Number(order.takeaway) === 1 ? '<div class="nuevo">*** PARA LLEVAR ***</div>' : ''}
   ${extraRound ? '<div class="nuevo">*** NUEVO ***</div>' : ''}
   <hr>
   <div>Pedido #${order.id}</div>
@@ -784,5 +836,6 @@ module.exports = {
   printCashExpense,
   printCashClose,
   invoicePayload,
-  ticketHtml
+  ticketHtml,
+  receiptPreviewHtml
 };

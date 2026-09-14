@@ -16,10 +16,9 @@ const db = require('./db');
 const { mountApi } = require('./api');
 const { autoBackup } = require('./backup');
 const { publicUser } = require('./db');
+const { SqliteSessionStore } = require('./session-store');
 
 db.init();
-const { syncLicenseFromDisk } = require('./license');
-syncLicenseFromDisk();
 autoBackup();
 
 const app = express();
@@ -31,20 +30,22 @@ const io = new Server(server, {
   connectTimeout: 45000
 });
 
+const sessionTtlMs = 16 * 60 * 60 * 1000;
 const sessionMiddleware = session({
   name: 'jr.sid',
   secret: db.getSetting('session_secret', 'jr-local-secret'),
   resave: false,
   saveUninitialized: false,
+  store: new SqliteSessionStore({ ttlMs: sessionTtlMs }),
   cookie: {
     httpOnly: true,
-    maxAge: 16 * 60 * 60 * 1000,
+    maxAge: sessionTtlMs,
     sameSite: 'lax'
   }
 });
 
 app.use(sessionMiddleware);
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '3mb' }));
 app.use((req, _res, next) => {
   req.io = io;
   next();
@@ -123,8 +124,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('  (No hay IP de red usable. Conecte el PC por cable o WiFi del local.)');
   }
   console.log('');
-  console.log('  Usuarios iniciales: admin / mesero / cocina / cajero');
-  console.log('  Contraseña inicial: el mismo nombre + 123  (ej. admin123)');
-  console.log('  Cambie las claves desde Usuarios.');
+  console.log('  Usuarios: admin / mesero / cocina / cajero');
+  console.log('  Cambie las contraseñas iniciales desde Usuarios (obligatorio al entrar).');
   console.log('');
 });

@@ -160,65 +160,91 @@ function moveStock({ ingredientId, type, quantity, reason, userId, referenceType
   return { ...ing, stock: next };
 }
 
+function consumeItemLines(it, userId, orderId, { allowNegative = false, reasonPrefix = 'Venta' } = {}) {
+  const lines = linesForItem(it.product_id, it.quantity, it.removed_json, it.added_json);
+  const skipped = parseRemoved(it.removed_json).map((x) => x.name).filter(Boolean);
+  const extras = parseAdded(it.added_json).map((x) => x.name).filter(Boolean);
+  let tag = '';
+  if (skipped.length) tag += ` (sin ${skipped.join(', ')})`;
+  if (extras.length) tag += ` (extra ${extras.join(', ')})`;
+  const seen = new Map();
+  for (const line of lines) {
+    seen.set(line.ingredient_id, (seen.get(line.ingredient_id) || 0) + line.need);
+  }
+  for (const [ingredientId, need] of seen) {
+    moveStock({
+      ingredientId,
+      type: 'sale',
+      quantity: -need,
+      reason: `${reasonPrefix}: ${it.product_name} x${it.quantity}${tag}`,
+      userId,
+      referenceType: 'order',
+      referenceId: orderId,
+      allowNegative
+    });
+  }
+}
+
+function restoreItemLines(it, userId, orderId, reasonPrefix = 'Anulación') {
+  const lines = linesForItem(it.product_id, it.quantity, it.removed_json, it.added_json);
+  const seen = new Map();
+  for (const line of lines) {
+    seen.set(line.ingredient_id, (seen.get(line.ingredient_id) || 0) + line.need);
+  }
+  for (const [ingredientId, need] of seen) {
+    moveStock({
+      ingredientId,
+      type: 'adjustment',
+      quantity: need,
+      reason: `${reasonPrefix}: ${it.product_name} x${it.quantity}`,
+      userId,
+      referenceType: 'order',
+      referenceId: orderId
+    });
+  }
+}
+
+/** Descuenta stock de ítems aún no tomados (p. ej. al enviar a cocina). */
+function consumeItems(items, userId, orderId, { allowNegative = false, reasonPrefix = 'Cocina' } = {}) {
+  const db = getDb();
+  for (const it of items) {
+    if (Number(it.stock_taken) === 1) continue;
+    consumeItemLines(it, userId, orderId, { allowNegative, reasonPrefix });
+    if (it.id) {
+      db.prepare('UPDATE order_items SET stock_taken = 1 WHERE id = ?').run(it.id);
+    }
+  }
+}
+
 function consumeOrder(orderId, userId, { allowNegative = false } = {}) {
   const db = getDb();
   const items = db.prepare(`
-    SELECT product_id, quantity, product_name, removed_json, added_json
+    SELECT id, product_id, quantity, product_name, removed_json, added_json, stock_taken
     FROM order_items
-    WHERE order_id = ? AND status != 'cancelled'
+    WHERE order_id = ? AND status != 'cancelled' AND COALESCE(stock_taken, 0) = 0
   `).all(orderId);
+  consumeItems(items, userId, orderId, { allowNegative, reasonPrefix: 'Venta' });
+}
 
-  for (const it of items) {
-    const lines = linesForItem(it.product_id, it.quantity, it.removed_json, it.added_json);
-    const skipped = parseRemoved(it.removed_json).map((x) => x.name).filter(Boolean);
-    const extras = parseAdded(it.added_json).map((x) => x.name).filter(Boolean);
-    let tag = '';
-    if (skipped.length) tag += ` (sin ${skipped.join(', ')})`;
-    if (extras.length) tag += ` (extra ${extras.join(', ')})`;
-    const seen = new Map();
-    for (const line of lines) {
-      seen.set(line.ingredient_id, (seen.get(line.ingredient_id) || 0) + line.need);
-    }
-    for (const [ingredientId, need] of seen) {
-      moveStock({
-        ingredientId,
-        type: 'sale',
-        quantity: -need,
-        reason: `Venta: ${it.product_name} x${it.quantity}${tag}`,
-        userId,
-        referenceType: 'order',
-        referenceId: orderId,
-        allowNegative
-      });
-    }
+function restoreItem(item, userId, orderId) {
+  if (!item || Number(item.stock_taken) !== 1) return;
+  restoreItemLines(item, userId, orderId, 'Devolución ítem');
+  if (item.id) {
+    getDb().prepare('UPDATE order_items SET stock_taken = 0 WHERE id = ?').run(item.id);
   }
 }
 
 function restoreOrder(orderId, userId) {
   const db = getDb();
   const items = db.prepare(`
-    SELECT product_id, quantity, product_name, removed_json, added_json
+    SELECT id, product_id, quantity, product_name, removed_json, added_json, stock_taken
     FROM order_items
-    WHERE order_id = ? AND status != 'cancelled'
+    WHERE order_id = ? AND status != 'cancelled' AND COALESCE(stock_taken, 0) = 1
   `).all(orderId);
 
   for (const it of items) {
-    const lines = linesForItem(it.product_id, it.quantity, it.removed_json, it.added_json);
-    const seen = new Map();
-    for (const line of lines) {
-      seen.set(line.ingredient_id, (seen.get(line.ingredient_id) || 0) + line.need);
-    }
-    for (const [ingredientId, need] of seen) {
-      moveStock({
-        ingredientId,
-        type: 'adjustment',
-        quantity: need,
-        reason: `Anulación venta: ${it.product_name} x${it.quantity}`,
-        userId,
-        referenceType: 'order',
-        referenceId: orderId
-      });
-    }
+    restoreItemLines(it, userId, orderId, 'Anulación venta');
+    db.prepare('UPDATE order_items SET stock_taken = 0 WHERE id = ?').run(it.id);
   }
 }
 
@@ -234,17 +260,13 @@ module.exports = {
   parseRemoved,
   parseAdded,
   recipeForProduct,
-  recipeForProduct: recipeForProduct,
   recipeUsed,
   checkStock,
-  checkStock: checkStock,
   checkItemsStock,
-  checkItemsStock: checkItemsStock,
   moveStock,
+  consumeItems,
   consumeOrder,
-  consumeOrder: consumeOrder,
+  restoreItem,
   restoreOrder,
-  restoreOrder: restoreOrder,
-  lowStock,
-  lowStock: lowStock
+  lowStock
 };

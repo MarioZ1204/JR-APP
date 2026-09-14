@@ -7,15 +7,51 @@ const {
   nextFloorSlot, presentTable
 } = require('./helpers');
 const inventory = require('./inventory');
+const { computeTuesdayBurgerPromo } = require('./promotions');
 const { normalizeUnitKind, normalizeUnit } = require('./unit-kinds');
 const { saveBackup, listBackups, scheduleRestore } = require('./backup');
-const { printInvoice, printTest, printKitchenOrder, printCashOpen, printCashExpense, printCashClose } = require('./print');
+const { printInvoice, printTest, printKitchenOrder, printCashOpen, printCashExpense, printCashClose, receiptPreviewHtml } = require('./print');
 const { lanUrls } = require('./lan');
-const { publicLicense, APP_VERSION } = require('./license');
+const { logoInfo, saveCustomLogo, removeCustomLogo, readCustomLogoFile } = require('./escpos-logo');
 const { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes, productHasChoices } = require('./ingredient-rules');
 
+const APP_VERSION = require('../package.json').version;
 function fail(res, status, message) {
   return res.status(status).json({ error: message });
+}
+
+/** Rate limit simple en memoria para /api/login (por IP). */
+const loginAttempts = new Map();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILS = 8;
+
+function clientIp(req) {
+  const xf = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xf || req.socket?.remoteAddress || 'local';
+}
+
+function loginBlocked(ip) {
+  const row = loginAttempts.get(ip);
+  if (!row) return false;
+  if (Date.now() - row.first > LOGIN_WINDOW_MS) {
+    loginAttempts.delete(ip);
+    return false;
+  }
+  return row.fails >= LOGIN_MAX_FAILS;
+}
+
+function noteLoginFail(ip) {
+  const now = Date.now();
+  const row = loginAttempts.get(ip);
+  if (!row || now - row.first > LOGIN_WINDOW_MS) {
+    loginAttempts.set(ip, { first: now, fails: 1 });
+    return;
+  }
+  row.fails += 1;
+}
+
+function clearLoginFails(ip) {
+  loginAttempts.delete(ip);
 }
 
 function clampPos(v) {
@@ -52,7 +88,6 @@ function mountApi(app) {
       business_name: getSetting('business_name', 'Mi Restaurante'),
       business_tagline: getSetting('business_tagline', ''),
       lan_urls: lanUrls(Number(process.env.PORT || 3000)),
-      license: publicLicense(),
       app_version: APP_VERSION,
       dates: dayRow
     });
@@ -63,29 +98,38 @@ function mountApi(app) {
   });
 
   app.post('/api/login', (req, res) => {
+    const ip = clientIp(req);
+    if (loginBlocked(ip)) {
+      return res.status(429).json({
+        error: 'Demasiados intentos fallidos. Espere unos minutos e intente de nuevo.'
+      });
+    }
     const username = String(req.body.username || '').trim();
     const password = String(req.body.password || '');
     const user = db().prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(username);
     if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+      noteLoginFail(ip);
       return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
     }
-    const lic = publicLicense();
-    if (lic.expired && user.role !== 'admin') {
-      return res.status(402).json({
-        error: 'El servicio venció. Contacte a su proveedor.',
-        code: 'LICENSE_EXPIRED',
-        license: lic
+    clearLoginFails(ip);
+    const finish = () => {
+      req.session.user = publicUser(user);
+      req.session.save((err) => {
+        if (err) return res.status(500).json({ error: 'No se pudo entrar. Intente otra vez' });
+        res.json({
+          user: publicUser(user),
+          must_change_password: Number(user.must_change_password) === 1
+        });
       });
+    };
+    if (typeof req.session.regenerate === 'function') {
+      req.session.regenerate((err) => {
+        if (err) return res.status(500).json({ error: 'No se pudo entrar. Intente otra vez' });
+        finish();
+      });
+    } else {
+      finish();
     }
-    req.session.user = publicUser(user);
-    req.session.save((err) => {
-      if (err) return res.status(500).json({ error: 'No se pudo entrar. Intente otra vez' });
-      res.json({
-        user: publicUser(user),
-        license: lic,
-        must_change_password: Number(user.must_change_password) === 1
-      });
-    });
   });
 
   app.post('/api/logout', (req, res) => {
@@ -103,7 +147,6 @@ function mountApi(app) {
       user: req.user,
       settings: s,
       alerts: inventory.lowStock(),
-      license: req.license,
       setup
     });
   });
@@ -140,11 +183,10 @@ function mountApi(app) {
       printer_name: s.printer_name || '',
       printer_enabled: s.printer_enabled === '1',
       block_on_no_stock: s.block_on_no_stock === '1',
+      promo_tuesday_burgers: s.promo_tuesday_burgers !== '0',
+      takeaway_fee_enabled: s.takeaway_fee_enabled !== '0',
+      takeaway_fee_amount: Math.max(0, Math.round(Number(s.takeaway_fee_amount != null ? s.takeaway_fee_amount : 500) || 0)),
       ticket_footer: s.ticket_footer || '',
-      vendor_name: s.vendor_name || '',
-      vendor_phone: s.vendor_phone || '',
-      vendor_whatsapp: s.vendor_whatsapp || '',
-      vendor_email: s.vendor_email || '',
       setup_completed: s.setup_completed === '1'
     };
   }
@@ -347,6 +389,28 @@ function mountApi(app) {
     res.json({ order });
   });
 
+  app.get('/api/orders/:id/promo-preview', requireAuth, requireRole('cashier', 'waiter'), (req, res) => {
+    const order = orderWithItems(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Pedido no encontrado' });
+    const active = (order.items || []).filter((i) => i.status !== 'cancelled');
+    const promo = computeTuesdayBurgerPromo(active);
+    res.json({ promo, order });
+  });
+
+  app.post('/api/orders/:id/takeaway', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
+    const order = db().prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (!order || ['billed', 'cancelled'].includes(order.status)) {
+      return res.status(400).json({ error: 'Este pedido ya está cerrado' });
+    }
+    const takeaway = req.body.takeaway === true || req.body.takeaway === 1 || req.body.takeaway === '1' ? 1 : 0;
+    db().prepare(`
+      UPDATE orders SET takeaway = ?, updated_at = datetime('now','localtime') WHERE id = ?
+    `).run(takeaway, order.id);
+    emit(req, 'orders:changed', { order_id: order.id });
+    emit(req, 'tables:changed', {});
+    res.json({ order: orderWithItems(order.id) });
+  });
+
   app.post('/api/orders', requireAuth, requireRole('waiter', 'cashier'), (req, res) => {
     const tableId = primaryTableId(Number(req.body.table_id));
     const table = db().prepare('SELECT * FROM restaurant_tables WHERE id = ?').get(tableId);
@@ -404,7 +468,7 @@ function mountApi(app) {
     const removedJson = JSON.stringify(removed);
     const addedJson = JSON.stringify(added);
     const stock = inventory.checkStock(product.id, quantity, removedJson, addedJson);
-    const block = getSetting('block_on_no_stock', '0') === '1';
+    const block = getSetting('block_on_no_stock', '1') === '1';
     if (!stock.ok && block) {
       return res.status(409).json({ error: 'No alcanza el ingrediente', shortages: stock.shortages });
     }
@@ -441,7 +505,7 @@ function mountApi(app) {
     }
     if (quantity !== item.quantity) {
       const stock = inventory.checkStock(item.product_id, quantity, item.removed_json, item.added_json);
-      const block = getSetting('block_on_no_stock', '0') === '1';
+      const block = getSetting('block_on_no_stock', '1') === '1';
       if (!stock.ok && block) {
         return res.status(409).json({ error: 'No alcanza el ingrediente', shortages: stock.shortages });
       }
@@ -458,6 +522,11 @@ function mountApi(app) {
     const order = db().prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
     if (!item || !order || ['billed', 'cancelled'].includes(order.status)) {
       return res.status(400).json({ error: 'No se puede quitar' });
+    }
+    try {
+      inventory.restoreItem(item, req.user.id, order.id);
+    } catch (e) {
+      return fail(res, e.http || 500, e.message || 'No se pudo devolver el stock');
     }
     db().prepare(`
       UPDATE order_items
@@ -477,6 +546,7 @@ function mountApi(app) {
     emit(req, 'orders:changed', { order_id: order.id });
     emit(req, 'kitchen:changed', {});
     emit(req, 'tables:changed', {});
+    emit(req, 'inventory:changed', {});
     res.json({ order: orderWithItems(order.id) });
   });
 
@@ -509,7 +579,7 @@ function mountApi(app) {
     if (!pending.length) return res.status(400).json({ error: 'No hay productos nuevos para enviar' });
 
     const stock = inventory.checkItemsStock(pending);
-    const block = getSetting('block_on_no_stock', '0') === '1';
+    const block = getSetting('block_on_no_stock', '1') === '1';
     if (!stock.ok && block) {
       return res.status(409).json({ error: 'No alcanza el ingrediente para enviar', shortages: stock.shortages });
     }
@@ -519,12 +589,24 @@ function mountApi(app) {
     ).get(order.id);
     const extraRound = Number(alreadySent?.n || 0) > 0;
 
-    db().prepare(`UPDATE order_items SET sent = 1 WHERE order_id = ? AND sent = 0 AND status != 'cancelled'`)
-      .run(order.id);
-    syncOrderStatus(order.id);
+    try {
+      withTx(() => {
+        inventory.consumeItems(pending, req.user.id, order.id, {
+          allowNegative: !block,
+          reasonPrefix: 'Cocina'
+        });
+        db().prepare(`UPDATE order_items SET sent = 1 WHERE order_id = ? AND sent = 0 AND status != 'cancelled'`)
+          .run(order.id);
+        syncOrderStatus(order.id);
+      });
+    } catch (e) {
+      return fail(res, e.http || 500, e.message || 'No se pudo enviar a cocina');
+    }
+
     emit(req, 'orders:changed', { order_id: order.id });
     emit(req, 'kitchen:changed', { order_id: order.id });
     emit(req, 'tables:changed', {});
+    emit(req, 'inventory:changed', {});
 
     let print = null;
     try {
@@ -901,7 +983,7 @@ function mountApi(app) {
 
     const taxRate = Number(getSetting('tax_rate', '0'));
     const included = getSetting('tax_included', '1') === '1';
-    const block = getSetting('block_on_no_stock', '0') === '1';
+    const block = getSetting('block_on_no_stock', '1') === '1';
 
     const given = Math.round(paySum);
     const applied = payments.map((p) => ({ method: p.method, amount: Number(p.amount) }));
@@ -922,7 +1004,17 @@ function mountApi(app) {
         }
 
         const subtotal = active.reduce((s, i) => s + i.quantity * i.unit_price, 0);
-        let discount = Math.max(0, Math.round(Number(req.body.discount) || 0));
+        const containerFee = Math.max(0, Math.round(Number(order.container_fee) || 0));
+        const promo = computeTuesdayBurgerPromo(active);
+        let discount;
+        let discountLabel = '';
+        if (promo.applied) {
+          discount = Math.max(0, Math.round(Number(promo.discount) || 0));
+          discountLabel = promo.ticket_label || '2da hamburguesa al 50%';
+        } else {
+          discount = Math.max(0, Math.round(Number(req.body.discount) || 0));
+          if (discount > 0) discountLabel = 'Descuento';
+        }
         let tip = Math.max(0, Math.round(Number(req.body.tip) || 0));
         if (discount > Math.round(subtotal)) {
           const err = new Error('El descuento no puede ser mayor que la suma');
@@ -938,7 +1030,7 @@ function mountApi(app) {
         } else if (taxRate > 0 && included) {
           tax = Math.round(base - base / (1 + taxRate / 100));
         }
-        total = Math.round(total + tip);
+        total = Math.round(total + tip + containerFee);
 
         if (given < Math.round(total)) {
           const err = new Error(`El pago (${given}) no cubre el total (${Math.round(total)})`);
@@ -977,9 +1069,9 @@ function mountApi(app) {
 
         const nextNum = (db().prepare('SELECT COALESCE(MAX(number),0) AS n FROM invoices').get().n) + 1;
         const info = db().prepare(`
-          INSERT INTO invoices (number, order_id, table_id, cashier_id, register_id, subtotal, discount, tip, tax_rate, tax, total)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(nextNum, order.id, order.table_id, req.user.id, register.id, subtotal, discount, tip, taxRate, tax, total);
+          INSERT INTO invoices (number, order_id, table_id, cashier_id, register_id, subtotal, discount, tip, tax_rate, tax, total, container_fee, discount_label)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(nextNum, order.id, order.table_id, req.user.id, register.id, subtotal, discount, tip, taxRate, tax, total, containerFee, discountLabel);
 
         const insPay = db().prepare('INSERT INTO payments (invoice_id, method, amount) VALUES (?, ?, ?)');
         const insMove = db().prepare(`
@@ -1004,7 +1096,7 @@ function mountApi(app) {
 
         inventory.consumeOrder(order.id, req.user.id, { allowNegative: !block });
         freeTableAndJoins(order.table_id);
-        return { invoiceId: info.lastInsertRowid, change };
+        return { invoiceId: info.lastInsertRowid, change, promo };
       });
 
       emit(req, 'tables:changed', {});
@@ -1018,6 +1110,7 @@ function mountApi(app) {
           invoice: invoiceFull(result.invoiceId),
           print,
           change: result.change,
+          promo: result.promo,
           alerts: inventory.lowStock()
         });
       }).catch((e) => {
@@ -1025,6 +1118,7 @@ function mountApi(app) {
           invoice: invoiceFull(result.invoiceId),
           print: { ok: false, error: e.message, mode: 'browser' },
           change: result.change,
+          promo: result.promo,
           alerts: inventory.lowStock()
         });
       });
@@ -1103,14 +1197,44 @@ function mountApi(app) {
             row.id
           );
         }
+
+        // Reabrir comanda y mesa para poder corregir o volver a cobrar
+        const order = db().prepare('SELECT * FROM orders WHERE id = ?').get(row.order_id);
+        if (order && order.status === 'billed') {
+          db().prepare(`
+            UPDATE orders SET status = 'delivered', updated_at = datetime('now','localtime')
+            WHERE id = ?
+          `).run(order.id);
+          syncOrderStatus(order.id);
+          const tableId = primaryTableId(order.table_id);
+          db().prepare(`
+            UPDATE restaurant_tables SET status = 'waiting_payment', joined_to_id = NULL
+            WHERE id = ?
+          `).run(tableId);
+          refreshTableStatus(tableId);
+
+          // Volver a reservar insumos de lo ya enviado a cocina
+          const sentItems = db().prepare(`
+            SELECT id, product_id, quantity, product_name, removed_json, added_json, stock_taken
+            FROM order_items
+            WHERE order_id = ? AND status != 'cancelled' AND sent = 1
+          `).all(order.id);
+          inventory.consumeItems(sentItems, req.user.id, order.id, {
+            allowNegative: true,
+            reasonPrefix: 'Reapertura'
+          });
+        }
         return row;
       });
       emit(req, 'cash:changed', {});
       emit(req, 'inventory:changed', {});
+      emit(req, 'orders:changed', {});
+      emit(req, 'tables:changed', {});
       res.json({
         ok: true,
         invoice: invoiceFull(inv.id),
-        message: `Ticket #${inv.number} anulado. El stock se restauró.`
+        order: orderWithItems(inv.order_id),
+        message: `Ticket #${inv.number} anulado. Se reabrió la mesa; el stock de cocina sigue reservado.`
       });
     } catch (e) {
       return fail(res, e.http || 500, e.message || 'No se pudo anular el ticket');
@@ -1571,7 +1695,7 @@ function mountApi(app) {
     const allowed = [
       'business_name', 'business_tagline', 'business_nit', 'business_address', 'business_phone',
       'tax_rate', 'tax_included', 'printer_width', 'printer_name', 'printer_enabled',
-      'block_on_no_stock', 'ticket_footer'
+      'block_on_no_stock', 'promo_tuesday_burgers', 'takeaway_fee_enabled', 'takeaway_fee_amount', 'ticket_footer'
     ];
     for (const key of allowed) {
       if (req.body[key] == null) continue;
@@ -1583,7 +1707,50 @@ function mountApi(app) {
     if (name && name !== 'Mi Restaurante' && name !== 'JR Burger') {
       setSetting('setup_completed', '1');
     }
-    res.json({ settings: publicSettings(), license: publicLicense() });
+    res.json({ settings: publicSettings() });
+  });
+
+  app.get('/api/receipt-logo', requireAuth, (req, res) => {
+    if (req.query.meta === '1') {
+      return res.json({ logo: logoInfo() });
+    }
+    const file = readCustomLogoFile();
+    if (!file) return res.status(404).json({ error: 'No hay logo' });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(file.buffer);
+  });
+
+  app.post('/api/receipt-logo', requireAuth, requireRole(), (req, res) => {
+    try {
+      const raw = String(req.body.image || '');
+      const m = raw.match(/^data:image\/png;base64,(.+)$/i);
+      if (!m) return fail(res, 400, 'Envíe una imagen PNG (data URL)');
+      const buf = Buffer.from(m[1], 'base64');
+      const logo = saveCustomLogo(buf);
+      res.json({ ok: true, logo });
+    } catch (e) {
+      return fail(res, e.http || 500, e.message || 'No se pudo guardar el logo');
+    }
+  });
+
+  app.delete('/api/receipt-logo', requireAuth, requireRole(), (req, res) => {
+    try {
+      const logo = removeCustomLogo();
+      res.json({ ok: true, logo });
+    } catch (e) {
+      return fail(res, e.http || 500, e.message || 'No se pudo quitar el logo');
+    }
+  });
+
+  app.get('/api/receipt-preview', requireAuth, requireRole(), (req, res) => {
+    const opts = {};
+    if (req.query.footer != null) opts.ticket_footer = String(req.query.footer);
+    if (req.query.address != null) opts.business_address = String(req.query.address);
+    if (req.query.phone != null) opts.business_phone = String(req.query.phone);
+    if (req.query.width != null) opts.printer_width = req.query.width;
+    const preview = receiptPreviewHtml(opts);
+    res.json({ html: preview.html, width_mm: preview.widthMm });
   });
 
   app.post('/api/backup', requireAuth, requireRole(), (req, res) => {

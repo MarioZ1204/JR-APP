@@ -128,6 +128,7 @@ function createSchema() {
       status TEXT NOT NULL DEFAULT 'open'
         CHECK(status IN ('open','sent','preparing','ready','delivered','billed','cancelled')),
       notes TEXT,
+      takeaway INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
@@ -149,7 +150,8 @@ function createSchema() {
       cancel_reason TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
       removed_json TEXT NOT NULL DEFAULT '[]',
-      added_json TEXT NOT NULL DEFAULT '[]'
+      added_json TEXT NOT NULL DEFAULT '[]',
+      stock_taken INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS item_changes (
@@ -174,6 +176,8 @@ function createSchema() {
       tax_rate REAL NOT NULL DEFAULT 0,
       tax REAL NOT NULL DEFAULT 0,
       total REAL NOT NULL,
+      container_fee REAL NOT NULL DEFAULT 0,
+      discount_label TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'paid' CHECK(status IN ('paid','cancelled')),
       created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
     );
@@ -259,6 +263,9 @@ function migrateSchema() {
   if (!itemCols.includes('added_json')) {
     getDb().exec("ALTER TABLE order_items ADD COLUMN added_json TEXT NOT NULL DEFAULT '[]'");
   }
+  if (!itemCols.includes('stock_taken')) {
+    getDb().exec('ALTER TABLE order_items ADD COLUMN stock_taken INTEGER NOT NULL DEFAULT 0');
+  }
   const prodCols = tableCols('products');
   if (!prodCols.includes('sort_order')) {
     getDb().exec('ALTER TABLE products ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
@@ -279,6 +286,18 @@ function migrateSchema() {
   }
   if (!invCols.includes('tip')) {
     getDb().exec('ALTER TABLE invoices ADD COLUMN tip REAL NOT NULL DEFAULT 0');
+  }
+  if (!invCols.includes('container_fee')) {
+    getDb().exec('ALTER TABLE invoices ADD COLUMN container_fee REAL NOT NULL DEFAULT 0');
+    invCols.push('container_fee');
+  }
+  if (!invCols.includes('discount_label')) {
+    getDb().exec("ALTER TABLE invoices ADD COLUMN discount_label TEXT NOT NULL DEFAULT ''");
+    invCols.push('discount_label');
+  }
+  const orderCols = tableCols('orders');
+  if (!orderCols.includes('takeaway')) {
+    getDb().exec('ALTER TABLE orders ADD COLUMN takeaway INTEGER NOT NULL DEFAULT 0');
   }
   const userCols = tableCols('users');
   if (!userCols.includes('must_change_password')) {
@@ -340,17 +359,13 @@ const DEFAULT_SETTINGS = {
   printer_width: '80',
   printer_name: '',
   printer_enabled: '0',
-  block_on_no_stock: '0',
+  block_on_no_stock: '1',
+  promo_tuesday_burgers: '1',
+  takeaway_fee_enabled: '1',
+  takeaway_fee_amount: '500',
   ticket_footer: '¡Gracias por su visita!',
   session_secret: 'jr-local-' + Math.random().toString(36).slice(2),
   last_auto_backup: '',
-  license_client: '',
-  license_until: '',
-  license_key: '',
-  vendor_name: '',
-  vendor_phone: '',
-  vendor_whatsapp: '',
-  vendor_email: '',
   setup_completed: '0'
 };
 

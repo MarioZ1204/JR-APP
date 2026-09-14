@@ -1,6 +1,6 @@
 import { api, money, formatQty, ROLE, TABLE_STATUS, ITEM_STATUS, ORDER_STATUS, MOVE_TYPE, PAY, today, daysAgo, navFor, homeFor, allowedViews, UNIT_KIND_LABELS, UNITS_BY_KIND, inferUnitKind, unitKindLabel } from './api.js';
-import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=64';
-import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=64';
+import { burgerPickerHtml, bindBurgerPicker, layerKind } from './burger-pick.js?v=71';
+import { isIngredientAddable, productAllowsIngredientExtras, productAllowsCustomNotes } from './ingredient-rules.js?v=71';
 
 const root = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
@@ -51,11 +51,16 @@ const state = {
   kitchenDark: localStorage.getItem('jr.kitchenDark') === '1',
   billDiscount: 0,
   billTip: 0,
-  license: null,
+  billPromo: null,
   setup: null,
+  appVersion: '1.1.0',
   dashboard: null,
   navCounts: {},
   tablesFilter: 'all',
+  configSection: null,
+  receiptLogo: null,
+  receiptPreviewHtml: '',
+  receiptPreviewWidth: 80,
   cartBump: false
 };
 
@@ -204,7 +209,7 @@ async function boot() {
     state.infoName = info.business_name;
     state.infoTagline = info.business_tagline || '';
     state.lanUrls = info.lan_urls || [];
-    state.license = info.license || null;
+    state.appVersion = info.app_version || state.appVersion;
     state.serverDates = info.dates || null;
     if (state.serverDates?.today) {
       state.to = state.serverDates.today;
@@ -227,7 +232,6 @@ async function boot() {
     state.user = me.user;
     state.settings = me.settings;
     state.alerts = me.alerts || [];
-    state.license = me.license || state.license;
     state.setup = me.setup || null;
     if (state.user.role === 'kitchen' && state.station === 'all') state.station = 'kitchen';
     connectSocket();
@@ -346,14 +350,12 @@ async function loadView(silent = false) {
       const me = await api('/api/me');
       state.alerts = me.alerts || [];
       state.settings = me.settings;
-      state.license = me.license || state.license;
       state.setup = me.setup || null;
     } else if (view === 'mesas') {
       const [tables, me] = await Promise.all([api('/api/tables'), api('/api/me')]);
       state.tables = tables.tables;
       state.alerts = me.alerts || [];
       state.settings = me.settings;
-      state.license = me.license || state.license;
       state.setup = me.setup || null;
     } else if (view === 'comanda') {
       const prevId = state.order?.id;
@@ -390,6 +392,16 @@ async function loadView(silent = false) {
         if (String(prevBill) !== String(state.order?.id)) {
           state.billDiscount = 0;
           state.billTip = 0;
+          state.billPromo = null;
+        }
+        try {
+          const prev = await api('/api/orders/' + params.id + '/promo-preview');
+          state.billPromo = prev.promo || null;
+          if (state.billPromo?.applied) {
+            state.billDiscount = Math.round(Number(state.billPromo.discount) || 0);
+          }
+        } catch {
+          state.billPromo = null;
         }
       } else state.order = null;
     } else if (view === 'caja') {
@@ -415,11 +427,20 @@ async function loadView(silent = false) {
       } catch { /* fechas locales de respaldo */ }
       await loadReports();
     } else if (view === 'config') {
-      const [s, b, t, info] = await Promise.all([api('/api/settings'), api('/api/backups'), api('/api/tables'), api('/api/info')]);
+      const [s, b, t, info, logo] = await Promise.all([
+        api('/api/settings'),
+        api('/api/backups'),
+        api('/api/tables'),
+        api('/api/info'),
+        api('/api/receipt-logo?meta=1').catch(() => ({ logo: null }))
+      ]);
       state.settings = s.settings;
       state.backups = b.backups;
       state.tables = t.tables;
+      state.infoName = info.business_name;
+      state.infoTagline = info.business_tagline || '';
       state.lanUrls = info.lan_urls || [];
+      state.receiptLogo = logo.logo || null;
     }
     await navP;
   } catch (e) {
@@ -601,7 +622,7 @@ function render() {
       <nav class="sidenav">
         <div class="sidenav-brand">
           <div class="logo-plate">
-            <img src="/logo.webp?v=64" alt="JR Burger" />
+            <img src="/logo.webp?v=71" alt="JR Burger" />
           </div>
           <b>${brand}</b>
           ${tagline ? `<span>${tagline}</span>` : ''}
@@ -614,14 +635,14 @@ function render() {
       </nav>
       <header class="topbar">
         <div class="brand">
-          <div class="logo-plate sm"><img src="/logo.webp?v=64" alt="${brand}" /></div>
+          <div class="logo-plate sm"><img src="/logo.webp?v=71" alt="${brand}" /></div>
           <div class="brand-copy"><b>${brand}</b>${tagline ? `<small>${tagline}</small>` : ''}</div>
         </div>
         <div class="grow"></div>
         <span class="chip"><span class="live-dot"></span>${esc(state.user.name)}</span>
         <button class="icon-btn" data-act="logout" title="Salir">Salir</button>
       </header>
-      <main class="page${state.loading || OP_VIEWS.has(state.view) ? '' : ' view-enter'}">${state.loading ? pageLoading() : `${licenseBanner()}${setupBanner()}${viewHtml()}`}</main>
+      <main class="page${state.loading || OP_VIEWS.has(state.view) ? '' : ' view-enter'}">${state.loading ? pageLoading() : `${setupBanner()}${viewHtml()}`}</main>
       ${morePanel}
       <nav class="bottom-nav">${bottomLinks}</nav>
     </div>`;
@@ -629,6 +650,7 @@ function render() {
   bind();
   if (state.view === 'mesas' && state.tablesView === 'floor') bindFloorMap();
   bindDataPanels();
+  bindReceiptPreview();
 
   if (focusSnap?.id) {
     const el = document.getElementById(focusSnap.id);
@@ -670,20 +692,13 @@ function brandTagline(raw) {
 function loginView() {
   const brand = esc(state.infoName || 'Sistema');
   const tag = esc(brandTagline(state.infoTagline));
-  const lic = state.license;
-  const licBanner = lic?.expired
-    ? `<div class="alert warn license-banner">El servicio venció${lic.until ? ` el ${esc(lic.until)}` : ''}. Contacte a su proveedor${lic.vendor_phone ? `: ${esc(lic.vendor_phone)}` : ''}.</div>`
-    : (lic?.status === 'warning'
-      ? `<div class="alert warn license-banner">El servicio vence en ${lic.days_left} día(s). Avise a su proveedor.</div>`
-      : '');
   return `
   <div class="login">
     <div class="login-card card">
-      <img class="login-logo" src="/logo.webp?v=64" alt="${brand}" />
+      <img class="login-logo" src="/logo.webp?v=71" alt="${brand}" />
       <h1>${brand}</h1>
       ${tag ? `<p class="lede">${tag}</p>` : ''}
       <p class="login-sub">Mesas, cocina, caja e informes en un solo lugar</p>
-      ${licBanner}
       <form data-act="login">
         <div class="field"><label>Usuario</label><input name="username" autocomplete="username" placeholder="Ej. admin" required /></div>
         <div class="field"><label>Contraseña</label><input name="password" type="password" autocomplete="current-password" placeholder="••••••••" required /></div>
@@ -691,24 +706,9 @@ function loginView() {
         <button class="btn primary block lg" type="submit">Entrar al sistema</button>
       </form>
       ${lanAccessCard()}
-      <p class="login-foot">v${esc(lic?.app_version || '1.1.0')}</p>
+      <p class="login-foot">v${esc(state.appVersion || '1.1.0')}</p>
     </div>
   </div>`;
-}
-
-function licenseBanner() {
-  const lic = state.license;
-  if (!lic || lic.status === 'dev') return '';
-  if (lic.expired) {
-    const contact = lic.vendor_phone
-      ? `${esc(lic.vendor_name || 'Proveedor')}: ${esc(lic.vendor_phone)}`
-      : 'Contacte a su proveedor.';
-    return `<div class="alert warn license-banner">El servicio de este sistema no está activo. ${contact}</div>`;
-  }
-  if (lic.status === 'warning') {
-    return `<div class="alert warn license-banner">Quedan ${lic.days_left} día(s) de servicio. Avise a su proveedor.</div>`;
-  }
-  return '';
 }
 
 function setupBanner() {
@@ -758,9 +758,10 @@ function viewHtml() {
   }
 }
 
-function pageHead(title, lede, actions = '') {
+function pageHead(title, lede, actions = '', lead = '') {
   return `<div class="page-head">
-    <div><h1>${title}</h1>${lede ? `<p class="lede">${lede}</p>` : ''}</div>
+    ${lead ? `<div class="page-lead">${lead}</div>` : ''}
+    <div class="page-head-main"><h1>${title}</h1>${lede ? `<p class="lede">${lede}</p>` : ''}</div>
     ${actions ? `<div class="page-actions">${actions}</div>` : ''}
   </div>`;
 }
@@ -776,7 +777,7 @@ function deltaBadge(pct) {
   const n = Number(pct) || 0;
   if (!n) return `<span class="delta flat">= ayer</span>`;
   const up = n > 0;
-  return `<span class="delta ${up ? 'up' : 'down'}">${up ? '▲' : '▼'} ${Math.abs(n)}% vs ayer</span>`;
+  return `<span class="delta ${up ? 'up' : 'down'}">${up ? 'â–²' : 'â–¼'} ${Math.abs(n)}% vs ayer</span>`;
 }
 
 function panelView() {
@@ -863,6 +864,25 @@ function panelView() {
       </section>
 
       <aside class="dash-side">
+        <div class="card">
+          <div class="ticket-head">Opciones del día</div>
+          <label class="switch-row">
+            <span>
+              <b>Promo 2×1 al 50%</b>
+              <small>Martes: segunda hamburguesa a mitad de precio</small>
+            </span>
+            <input type="checkbox" class="switch" data-act="toggle-setting" data-key="promo_tuesday_burgers"
+              ${state.settings.promo_tuesday_burgers !== false ? 'checked' : ''} />
+          </label>
+          <label class="switch-row">
+            <span>
+              <b>Cobrar contenedor</b>
+              <small>Para llevar · ${money(Math.max(0, Math.round(Number(state.settings.takeaway_fee_amount != null ? state.settings.takeaway_fee_amount : 500) || 0)))}</small>
+            </span>
+            <input type="checkbox" class="switch" data-act="toggle-setting" data-key="takeaway_fee_enabled"
+              ${state.settings.takeaway_fee_enabled !== false ? 'checked' : ''} />
+          </label>
+        </div>
         <div class="card">
           <div class="ticket-head">Salón</div>
           <div class="dash-salon">
@@ -1024,7 +1044,10 @@ function tableCard(t) {
   const joined = t.joined_to_id;
   const status = joined ? 'occupied' : t.status;
   const label = joined ? `Junto con ${esc(t.joined_to_name)}` : TABLE_STATUS[t.status];
-  const extra = t.order ? `${t.order.item_count} productos · ${money(t.order.subtotal)}` : `${t.seats} personas`;
+  const orderAmt = t.order ? (t.order.payable != null ? t.order.payable : t.order.subtotal) : 0;
+  const extra = t.order
+    ? `${t.order.item_count} productos · ${money(orderAmt)}${t.order.takeaway ? ' · Para llevar' : ''}`
+    : `${t.seats} personas`;
   return `
     <button class="card table-card ${status} ${joined ? 'joined' : ''} ${t.order ? 'pulse' : ''}${status === 'waiting_payment' ? ' pay-attention' : ''}"
       data-act="table" data-id="${t.id}">
@@ -1032,7 +1055,7 @@ function tableCard(t) {
         <div class="between"><div class="name">${esc(t.name)}</div><span class="badge ${status}">${label}</span></div>
         <div class="meta">${extra}${t.order ? `<br>${esc(t.order.waiter_name)}` : ''}</div>
       </div>
-      <div class="amount">${t.order ? money(t.order.subtotal) : ''}</div>
+      <div class="amount">${t.order ? money(orderAmt) : ''}</div>
     </button>`;
 }
 
@@ -1059,7 +1082,7 @@ function catKey(name) {
 
 function catIcon(name) {
   const key = catKey(name);
-  return `<img class="cat-ico cat-ico-${key}" src="/icons/cats/${key}.webp?v=64" alt="" width="64" height="64" decoding="async" draggable="false" />`;
+  return `<img class="cat-ico cat-ico-${key}" src="/icons/cats/${key}.webp?v=71" alt="" width="64" height="64" decoding="async" draggable="false" />`;
 }
 
 function orderView() {
@@ -1074,6 +1097,9 @@ function orderView() {
     : (browsing ? [] : state.products.filter((p) => String(p.category_id) === String(state.categoryId)));
   const unsent = active.filter((i) => !i.sent).length;
   const billed = ['billed', 'cancelled'].includes(o.status);
+  const displayTotal = o.payable != null ? o.payable : o.subtotal;
+  const feeOn = state.settings.takeaway_fee_enabled !== false;
+  const feeAmt = Math.max(0, Math.round(Number(state.settings.takeaway_fee_amount != null ? state.settings.takeaway_fee_amount : 500) || 0));
   const joinedTables = (state.tables || []).filter((t) => t.joined_to_id === o.table_id);
   const backAct = q ? 'data-act="pos-clear-search"' : (browsing ? 'data-act="nav" data-view="mesas"' : 'data-act="cat-home"');
   const title = q ? 'Buscar' : (browsing ? esc(o.table_name) : esc(cat?.name || 'Grupo'));
@@ -1114,7 +1140,7 @@ function orderView() {
       <div class="pos-main">
         <header class="pos-bar">
           <div class="pos-bar-top">
-            <button type="button" class="pos-back" ${backAct} aria-label="Volver">←</button>
+            <button type="button" class="pos-back" ${backAct} aria-label="Volver">â†</button>
             <div class="pos-bar-copy">
               <h1>${title}</h1>
               <p>${subtitle}</p>
@@ -1141,7 +1167,7 @@ function orderView() {
               <div class="pos-line-amt">${money(it.quantity * it.unit_price)}</div>
               ${it.status !== 'cancelled' && !billed ? `
                 <div class="pos-line-qty">
-                  <button type="button" data-act="qty" data-id="${it.id}" data-d="-1">−</button>
+                  <button type="button" data-act="qty" data-id="${it.id}" data-d="-1">âˆ’</button>
                   <span>${it.quantity}</span>
                   <button type="button" data-act="qty" data-id="${it.id}" data-d="1">+</button>
                   ${orderItemAllowsCustomNotes(it) ? `<button type="button" class="ghost" data-act="note-item" data-id="${it.id}">Nota</button>` : ''}
@@ -1150,7 +1176,13 @@ function orderView() {
             </div>`).join('') || '<div class="empty">Toque un producto para agregarlo</div>'}
         </div>
         <div class="pos-ticket-foot">
-          <div class="pos-total"><span>Total</span><b>${money(o.subtotal)}</b></div>
+          ${billed ? '' : `
+          <button type="button" class="btn ${o.takeaway ? 'gold' : 'ghost'} block" data-act="toggle-takeaway">
+            ${o.takeaway ? '✓ Para llevar' : 'Para llevar'}
+            ${o.takeaway && feeOn && feeAmt > 0 ? ` · +${money(feeAmt)} contenedor` : ''}
+          </button>`}
+          ${o.takeaway && o.container_fee > 0 ? `<div class="between muted small"><span>Contenedor</span><span>${money(o.container_fee)}</span></div>` : ''}
+          <div class="pos-total"><span>Total</span><b>${money(displayTotal)}</b></div>
           <button type="button" class="btn primary block lg${state.busy === 'send' ? ' is-busy' : ''}" data-act="send-order" ${!unsent || state.busy ? 'disabled' : ''}>${state.busy === 'send' ? 'Enviando…' : `Enviar a cocina (${unsent})`}</button>
           <button type="button" class="btn gold block" data-act="wait-pay">Pedir cuenta</button>
           <div class="pos-ticket-extra">
@@ -1166,8 +1198,8 @@ function orderView() {
     ${billed ? '' : `
     <div class="pos-dock${state.cartBump ? ' bump' : ''}">
       <button type="button" class="pos-dock-cart" data-act="toggle-ticket">
-        <span>${active.length} prod.</span>
-        <b>${money(o.subtotal)}</b>
+        <span>${active.length} prod.${o.takeaway ? ' · llevar' : ''}</span>
+        <b>${money(displayTotal)}</b>
       </button>
       <button type="button" class="btn primary${state.busy === 'send' ? ' is-busy' : ''}" data-act="send-order" ${!unsent || state.busy ? 'disabled' : ''}>${state.busy === 'send' ? 'Enviando…' : `Enviar${unsent ? ` (${unsent})` : ''}`}</button>
     </div>`}`;
@@ -1204,7 +1236,7 @@ function kitchenView() {
         <article class="card kds-card ${esc(o.status)} ${wait.minutes >= 10 ? 'late' : ''}">
           <div class="kds-top">
             <div>
-              <h2>${esc(o.table_name)}</h2>
+              <h2>${esc(o.table_name)}${o.takeaway ? ' · Llevar' : ''}</h2>
               <div class="small muted">#${o.id} · ${esc(o.waiter_name)}</div>
             </div>
             <div class="kds-meta">
@@ -1292,22 +1324,36 @@ function billForm(o, openCash) {
   const taxRate = Number(state.settings.tax_rate || 0);
   const included = state.settings.tax_included;
   const subtotal = o.subtotal;
-  const discount = Math.min(Math.max(0, Math.round(Number(state.billDiscount) || 0)), Math.round(subtotal));
+  const containerFee = Math.max(0, Math.round(Number(o.container_fee) || 0));
+  const promo = state.billPromo;
+  const promoOn = Boolean(promo?.applied && Number(promo.discount) > 0);
+  const discount = promoOn
+    ? Math.min(Math.max(0, Math.round(Number(promo.discount) || 0)), Math.round(subtotal))
+    : Math.min(Math.max(0, Math.round(Number(state.billDiscount) || 0)), Math.round(subtotal));
   const tip = Math.max(0, Math.round(Number(state.billTip) || 0));
   const base = Math.max(0, subtotal - discount);
   let tax = 0, total = base;
   if (taxRate > 0 && !included) { tax = Math.round(base * taxRate / 100); total = base + tax; }
   else if (taxRate > 0 && included) tax = Math.round(base - base / (1 + taxRate / 100));
-  total = Math.round(total + tip);
+  total = Math.round(total + tip + containerFee);
   return `
-    ${pageHead('Cobrar ' + esc(o.table_name), '', `<button class="btn ghost" data-act="nav" data-view="facturar">Volver</button>`)}
+    ${pageHead('Cobrar ' + esc(o.table_name), '', '', `<button class="btn ghost" data-act="nav" data-view="facturar">Volver</button>`)}
     ${!openCash ? '<div class="alert warn">Primero abra la caja.</div>' : ''}
+    ${o.takeaway ? `<div class="alert warn">Para llevar${containerFee > 0 ? ` · contenedor ${money(containerFee)}` : ''}</div>` : ''}
+    ${!['billed', 'cancelled'].includes(o.status) ? `
+      <div class="row" style="margin-bottom:12px">
+        <button type="button" class="btn ${o.takeaway ? 'gold' : 'ghost'}" data-act="toggle-takeaway">
+          ${o.takeaway ? '✓ Para llevar' : 'Marcar para llevar'}
+        </button>
+      </div>` : ''}
+    ${promoOn ? `<div class="alert warn">${esc(promo.label || 'Segunda hamburguesa al 50%')} · descuento ${money(discount)}</div>` : ''}
     <div class="bill-grid">
       <div class="card">
         <div class="ticket-head">Lo que pidieron</div>
         ${active.map((i) => `<div class="ticket-line"><span>${i.quantity}× ${esc(i.product_name)}${modsText(i) ? `<div class="notes">${esc(modsText(i))}</div>` : ''}</span><span class="line-amt">${money(i.quantity * i.unit_price)}</span></div>`).join('')}
         <div class="between muted"><span>Suma</span><span>${money(subtotal)}</span></div>
-        ${discount ? `<div class="between muted"><span>Descuento</span><span>-${money(discount)}</span></div>` : ''}
+        ${discount ? `<div class="between muted"><span>${promoOn ? (promo.ticket_label || promo.label || '2da hamburguesa al 50%') : 'Descuento'}</span><span>-${money(discount)}</span></div>` : ''}
+        ${containerFee ? `<div class="between muted"><span>Contenedor</span><span>${money(containerFee)}</span></div>` : ''}
         ${taxRate ? `<div class="between muted"><span>IVA ${taxRate}%${included ? ' (incluido)' : ''}</span><span>${money(tax)}</span></div>` : ''}
         ${tip ? `<div class="between muted"><span>Propina</span><span>${money(tip)}</span></div>` : ''}
         <div class="ticket-total"><span>Total</span><b>${money(total)}</b></div>
@@ -1315,7 +1361,8 @@ function billForm(o, openCash) {
       <form class="card" data-act="invoice" data-total="${total}" data-oid="${o.id}">
         <div class="ticket-head">Cómo pagan</div>
         <div class="field"><label>Descuento ($)</label>
-          <input type="number" min="0" step="1" name="discount" data-act="bill-adj" data-field="discount" value="${discount}" /></div>
+          <input type="number" min="0" step="1" name="discount" data-act="bill-adj" data-field="discount" value="${discount}" ${promoOn ? 'disabled' : ''} />
+          ${promoOn ? '<p class="hint">Segunda hamburguesa al 50%. No se puede editar a mano.</p>' : ''}</div>
         <div class="field"><label>Propina ($)</label>
           <input type="number" min="0" step="1" name="tip" data-act="bill-adj" data-field="tip" value="${tip}" /></div>
         <p class="small muted">Puede mezclar efectivo, Nequi y Daviplata. Junto debe alcanzar para el total. Si en efectivo dan de más, el vuelto no entra a la caja como venta.</p>
@@ -1339,13 +1386,14 @@ function cashDiffLabel(n) {
   return 'Falta ' + money(-v);
 }
 
-function salonResetCard(salon) {
+function salonResetCard(salon, { standalone = false } = {}) {
   const open = Number(salon?.open_orders || 0);
   const occ = Number(salon?.occupied_tables || 0);
   return `
-    <div class="card" style="margin-top:14px">
+    <div class="card"${standalone ? '' : ' style="margin-top:14px"'}>
       <div class="ticket-head">Reiniciar salón</div>
-      <p class="hint">Cancela las cuentas que no se cobraron y deja las mesas libres. Las ventas ya cobradas y los reportes no se tocan.</p>
+      <p class="hint"><b>¿Para qué sirve?</b> Si quedó una mesa ocupada por error, un pedido de prueba o el turno terminó con cuentas sin cobrar, esto cancela esas cuentas abiertas y deja todas las mesas libres.</p>
+      <p class="hint">No borra ventas ya cobradas, ni reportes, ni el dinero de la caja. Solo limpia lo que sigue “abierto” en el salón.</p>
       <p class="small muted">${open || occ ? `Ahora: ${open} cuenta(s) abierta(s), ${occ} mesa(s) ocupada(s).` : 'No hay cuentas abiertas.'}</p>
       <button class="btn danger" data-act="reset-salon">Reiniciar cuentas y mesas</button>
     </div>`;
@@ -1392,7 +1440,7 @@ function cashView() {
       </form>
       <form class="card" data-act="close-cash">
         <div class="ticket-head">Cierre de caja</div>
-        <p class="hint">Cuente el efectivo. El sistema compara con la base + ventas en efectivo − gastos.</p>
+        <p class="hint">Cuente el efectivo. El sistema compara con la base + ventas en efectivo âˆ’ gastos.</p>
         <div class="field"><label>¿Cuánto efectivo hay ahora?</label><input name="counted_cash" type="number" min="0" required /></div>
         <div class="field"><label>Nota (si quiere)</label><input name="notes" /></div>
         <button type="submit" class="btn danger block${state.busy === 'cash-close' ? ' is-busy' : ''}" ${state.busy ? 'disabled' : ''}>${state.busy === 'cash-close' ? 'Cerrando…' : 'Cerrar caja'}</button>
@@ -1782,86 +1830,187 @@ function reportsView() {
 
 function configView() {
   const s = state.settings;
-  return `
-    ${pageHead('Ajustes', 'Datos del restaurante, impresora y copias.')}
-    <div class="settings-grid">
-    <form class="card" data-act="save-settings">
-      <div class="ticket-head">Datos del negocio</div>
-      <div class="field"><label>Nombre del restaurante</label><input name="business_name" value="${esc(s.business_name || '')}" required /></div>
-      <div class="field"><label>Eslogan / subtítulo</label><input name="business_tagline" value="${esc(s.business_tagline || '')}" placeholder="Ej. Comidas rápidas" /></div>
-      <div class="field"><label>NIT</label><input name="business_nit" value="${esc(s.business_nit || '')}" /></div>
-      <div class="field"><label>Dirección</label><input name="business_address" value="${esc(s.business_address || '')}" /></div>
-      <div class="field"><label>Teléfono</label><input name="business_phone" value="${esc(s.business_phone || '')}" /></div>
-      <div class="field"><label>IVA (%)</label><input name="tax_rate" type="number" min="0" step="0.1" value="${s.tax_rate || 0}" /></div>
-      <div class="field"><label>¿El precio ya trae IVA?</label>
-        <select name="tax_included"><option value="1" ${s.tax_included ? 'selected' : ''}>Sí, ya está incluido</option>
-        <option value="0" ${s.tax_included ? '' : 'selected'}>No, se suma al cobrar</option></select></div>
-      <div class="field"><label>Ancho del recibo</label>
-        <select name="printer_width">
-          <option value="80" ${Number(s.printer_width) !== 58 ? 'selected' : ''}>80 mm</option>
-          <option value="58" ${Number(s.printer_width) === 58 ? 'selected' : ''}>58 mm</option>
-        </select>
-        <p class="hint">Si el ticket se corta o sale incompleto, pruebe 58 mm (SAT38TUSE suele ser 58 mm).</p></div>
-      <div class="field"><label>¿Cómo se imprime?</label>
-        <select name="printer_enabled"><option value="0" ${s.printer_enabled ? '' : 'selected'}>Desde el computador (elige la impresora)</option>
-        <option value="1" ${s.printer_enabled ? 'selected' : ''}>Directo a la impresora del restaurante</option></select></div>
-      <div class="field"><label>Nombre de la impresora (como sale en Windows)</label>
-        <input name="printer_name" value="${esc(s.printer_name || '')}" placeholder="SAT38TUSE" />
-        <p class="hint">Configuración → Impresoras: use el nombre exacto (ej. SAT38TUSE). No hace falta compartirla.</p></div>
-      <div class="field"><label>Si se acaba un ingrediente</label>
-        <select name="block_on_no_stock">
-          <option value="0" ${s.block_on_no_stock ? '' : 'selected'}>Avisar y dejar vender</option>
-          <option value="1" ${s.block_on_no_stock ? 'selected' : ''}>No dejar vender</option>
-        </select></div>
-      <div class="field"><label>Texto al final del recibo</label><input name="ticket_footer" value="${esc(s.ticket_footer || '')}" /></div>
-      <button class="btn primary">Guardar</button>
-    </form>
-    <div>
-    <div class="card">
-      <div class="ticket-head">Cuenta</div>
-      <p class="hint">Cambie su contraseña de acceso.</p>
-      <button type="button" class="btn ghost" data-act="change-pass-self">Cambiar mi contraseña</button>
-    </div>
-    <div class="card" style="margin-top:14px">
-      <div class="ticket-head">Impresora y copias</div>
-      <div class="row">
-        <button class="btn ghost" data-act="print-test">Probar recibo</button>
-        <button class="btn sage" data-act="backup">Guardar copia</button>
+  const section = state.configSection;
+  const back = `<button type="button" class="btn ghost" data-act="config-section" data-id="">Volver</button>`;
+  const open = (state.tables || []).filter((t) => t.order).length;
+  const occ = (state.tables || []).filter((t) => t.order || t.status === 'occupied' || t.status === 'waiting_payment').length;
+  const logo = state.receiptLogo || {};
+
+  if (!section) {
+    const items = [
+      ['negocio', 'Datos del negocio', 'Nombre, dirección, teléfono, IVA y contenedor'],
+      ['recibo', 'Datos del recibo', 'Logo superior y texto al final del ticket'],
+      ['impresora', 'Ajustes de impresora', 'Ancho, nombre Windows y prueba de impresión'],
+      ['cuenta', 'Cuenta', 'Cambiar contraseña y acceso'],
+      ['salon', 'Reiniciar salón', 'Liberar mesas y cancelar cuentas abiertas'],
+      ['mesas', 'Agregar o quitar mesas', 'Crear, editar o eliminar mesas del salón']
+    ];
+    return `
+      ${pageHead('Ajustes', 'Elija una opción para configurar el sistema.')}
+      <div class="settings-menu">
+        ${items.map(([id, title, desc]) => `
+          <button type="button" class="settings-menu-item" data-act="config-section" data-id="${id}">
+            <span>
+              <b>${title}</b>
+              <small>${desc}</small>
+            </span>
+            <span class="settings-menu-chevron" aria-hidden="true">›</span>
+          </button>`).join('')}
+      </div>`;
+  }
+
+  if (section === 'negocio') {
+    return `
+      ${pageHead('Datos del negocio', 'Información que identifica al restaurante.', '', back)}
+      <form class="card form-narrow" data-act="save-settings">
+        <div class="field"><label>Nombre del restaurante</label><input name="business_name" value="${esc(s.business_name || '')}" required /></div>
+        <div class="field"><label>Eslogan / subtítulo</label><input name="business_tagline" value="${esc(s.business_tagline || '')}" placeholder="Ej. Comidas rápidas" /></div>
+        <div class="field"><label>NIT</label><input name="business_nit" value="${esc(s.business_nit || '')}" /></div>
+        <div class="field"><label>Dirección</label><input name="business_address" value="${esc(s.business_address || '')}" /></div>
+        <div class="field"><label>Teléfono (domicilios)</label><input name="business_phone" value="${esc(s.business_phone || '')}" /></div>
+        <div class="field"><label>IVA (%)</label><input name="tax_rate" type="number" min="0" step="0.1" value="${s.tax_rate || 0}" /></div>
+        <div class="field"><label>¿El precio ya trae IVA?</label>
+          <select name="tax_included"><option value="1" ${s.tax_included ? 'selected' : ''}>Sí, ya está incluido</option>
+          <option value="0" ${s.tax_included ? '' : 'selected'}>No, se suma al cobrar</option></select></div>
+        <div class="field"><label>Si se acaba un ingrediente</label>
+          <select name="block_on_no_stock">
+            <option value="0" ${s.block_on_no_stock ? '' : 'selected'}>Avisar y dejar vender</option>
+            <option value="1" ${s.block_on_no_stock ? 'selected' : ''}>No dejar vender</option>
+          </select></div>
+        <div class="field"><label>Valor del contenedor ($)</label>
+          <input name="takeaway_fee_amount" type="number" min="0" step="1" value="${Math.max(0, Math.round(Number(s.takeaway_fee_amount != null ? s.takeaway_fee_amount : 500) || 0))}" />
+          <p class="hint">El cobro se activa o desactiva en el panel principal. Solo aplica a pedidos «Para llevar».</p>
+        </div>
+        <button class="btn primary">Guardar</button>
+      </form>`;
+  }
+
+  if (section === 'recibo') {
+    const widthMm = Number(state.receiptPreviewWidth || s.printer_width || 80) === 58 ? 58 : 80;
+    const previewHtml = state.receiptPreviewHtml || '';
+    return `
+      ${pageHead('Datos del recibo', 'Logo, texto final y vista previa del ticket.', '', back)}
+      <div class="receipt-layout">
+        <div class="receipt-edit">
+          <div class="card">
+            <div class="ticket-head">Logo del recibo</div>
+            <p class="hint">Esta imagen sale arriba del ticket. Mejor PNG o JPG claro, fondo blanco o transparente.</p>
+            <div class="receipt-logo-preview">
+              ${logo.preview_url
+                ? `<img src="${esc(logo.preview_url)}" alt="Logo del recibo" />`
+                : '<div class="empty">Todavía no hay logo cargado</div>'}
+            </div>
+            <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:12px">
+              <label class="btn ghost" style="cursor:pointer">
+                Cargar imagen
+                <input type="file" accept="image/png,image/jpeg,image/webp,image/*" hidden data-act="upload-receipt-logo" />
+              </label>
+              ${logo.custom ? '<button type="button" class="btn danger" data-act="remove-receipt-logo">Quitar logo personalizado</button>' : ''}
+              <button type="button" class="btn ghost" data-act="print-test">Probar impresión</button>
+            </div>
+            ${logo.custom ? '<p class="small muted" style="margin-top:10px">Está usando el logo que cargó.</p>' : '<p class="small muted" style="margin-top:10px">Si no carga uno, se usa el logo por defecto del sistema.</p>'}
+          </div>
+          <form class="card" style="margin-top:14px" data-act="save-settings">
+            <div class="field"><label>Texto al final del recibo</label>
+              <input name="ticket_footer" data-act="receipt-footer-draft" value="${esc(s.ticket_footer || '')}" /></div>
+            <button class="btn primary">Guardar</button>
+          </form>
+        </div>
+        <div class="card receipt-preview-card">
+          <div class="between" style="margin-bottom:10px">
+            <div class="ticket-head" style="margin:0">Vista previa</div>
+            <span class="small muted">${widthMm} mm · ejemplo</span>
+          </div>
+          <p class="hint">Así se vería el recibo del cliente con el logo y datos actuales.</p>
+          <div class="receipt-preview-frame" style="--ticket-w:${widthMm}mm">
+            ${previewHtml
+              ? '<iframe title="Vista previa del recibo" class="receipt-preview-iframe"></iframe>'
+              : '<div class="empty">Cargando vista previa…</div>'}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  if (section === 'impresora') {
+    return `
+      ${pageHead('Ajustes de impresora', 'Cómo sale el ticket en papel.', '', back)}
+      <form class="card form-narrow" data-act="save-settings">
+        <div class="field"><label>Ancho del recibo</label>
+          <select name="printer_width">
+            <option value="80" ${Number(s.printer_width) !== 58 ? 'selected' : ''}>80 mm</option>
+            <option value="58" ${Number(s.printer_width) === 58 ? 'selected' : ''}>58 mm</option>
+          </select>
+          <p class="hint">Si el ticket se corta o sale incompleto, pruebe 58 mm (SAT38TUSE suele ser 58 mm).</p></div>
+        <div class="field"><label>¿Cómo se imprime?</label>
+          <select name="printer_enabled"><option value="0" ${s.printer_enabled ? '' : 'selected'}>Desde el computador (elige la impresora)</option>
+          <option value="1" ${s.printer_enabled ? 'selected' : ''}>Directo a la impresora del restaurante</option></select></div>
+        <div class="field"><label>Nombre de la impresora (como sale en Windows)</label>
+          <input name="printer_name" value="${esc(s.printer_name || '')}" placeholder="SAT38TUSE" />
+          <p class="hint">Configuración → Impresoras: use el nombre exacto (ej. SAT38TUSE).</p></div>
+        <button class="btn primary">Guardar</button>
+      </form>
+      <div class="card form-narrow" style="margin-top:14px">
+        <div class="ticket-head">Prueba y copias</div>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <button type="button" class="btn ghost" data-act="print-test">Probar recibo</button>
+          <button type="button" class="btn sage" data-act="backup">Guardar copia</button>
+        </div>
+        <p class="hint" style="margin-top:12px">Las copias quedan en la carpeta backups. Al encender el sistema se guarda una sola.</p>
+        <ul class="backup-list">${(state.backups || []).map((b) => `
+          <li class="backup-item">
+            <span>${esc(b.filename)}</span>
+            <button type="button" class="btn ghost" data-act="restore-backup" data-file="${esc(b.filename)}">Restaurar</button>
+          </li>`).join('') || '<li>Todavía no hay copias</li>'}
+        </ul>
+        <p class="small muted">Restaurar pide reiniciar el sistema (cerrar la ventana e iniciar.bat). Antes se guarda una copia de seguridad.</p>
+      </div>`;
+  }
+
+  if (section === 'cuenta') {
+    return `
+      ${pageHead('Cuenta', 'Acceso de su usuario.', '', back)}
+      <div class="card form-narrow">
+        <div class="ticket-head">Contraseña</div>
+        <p class="hint">Cambie su contraseña de acceso al sistema.</p>
+        <button type="button" class="btn ghost" data-act="change-pass-self">Cambiar mi contraseña</button>
       </div>
-      <p class="hint" style="margin-top:12px">Las copias quedan en la carpeta backups. Al encender el sistema se guarda una sola.</p>
-      <ul class="backup-list">${(state.backups || []).map((b) => `
-        <li class="backup-item">
-          <span>${esc(b.filename)}</span>
-          <button type="button" class="btn ghost" data-act="restore-backup" data-file="${esc(b.filename)}">Restaurar</button>
-        </li>`).join('') || '<li>Todavía no hay copias</li>'}
-      </ul>
-      <p class="small muted">Restaurar pide reiniciar el sistema (cerrar la ventana e iniciar.bat). Antes se guarda una copia de seguridad.</p>
-    </div>
-    ${/^(localhost|127\.0\.0\.1)$/i.test(location.hostname) ? `
-    <div class="card" style="margin-top:14px">
-      <div class="ticket-head">Acceso desde el celular</div>
-      ${lanAccessCard()}
-    </div>` : ''}
-    <div class="card" style="margin-top:14px">
-      <div class="ticket-head">Instalar en tablet / celular</div>
-      <p class="hint">En Chrome o Edge: menú → <b>Instalar aplicación</b> o <b>Agregar a la pantalla de inicio</b>. Así cocina y caja se abren a pantalla completa sin barra del navegador.</p>
-      <p class="small muted">La app necesita el PC servidor encendido; sin red local no cobra ni toma pedidos.</p>
-    </div>
-    ${salonResetCard({ open_orders: (state.tables || []).filter((t) => t.order).length, occupied_tables: (state.tables || []).filter((t) => t.order || t.status === 'occupied' || t.status === 'waiting_payment').length })}
-    <div class="card" style="margin-top:14px">
-      <div class="between"><div class="ticket-head" style="margin:0">Mesas</div>
-        <button class="btn" data-act="new-table">Agregar mesa</button></div>
-      ${(state.tables || []).map((t) => `
-        <div class="table-row">
-          <span>${esc(t.name)} · ${t.seats} sillas</span>
-          <span class="row">
-            <button class="btn" data-act="edit-table" data-id="${t.id}">Editar</button>
-            <button class="btn danger" data-act="del-table" data-id="${t.id}">Quitar</button>
-          </span>
-        </div>`).join('')}
-    </div>
-    </div>
-    </div>`;
+      ${/^(localhost|127\.0\.0\.1)$/i.test(location.hostname) ? `
+      <div class="card form-narrow" style="margin-top:14px">
+        <div class="ticket-head">Acceso desde el celular</div>
+        ${lanAccessCard()}
+      </div>` : ''}
+      <div class="card form-narrow" style="margin-top:14px">
+        <div class="ticket-head">Instalar en tablet / celular</div>
+        <p class="hint">En Chrome o Edge: menú → <b>Instalar aplicación</b> o <b>Agregar a la pantalla de inicio</b>. Así cocina y caja se abren a pantalla completa.</p>
+        <p class="small muted">La app necesita el PC servidor encendido; sin red local no cobra ni toma pedidos.</p>
+      </div>`;
+  }
+
+  if (section === 'salon') {
+    return `
+      ${pageHead('Reiniciar salón', 'Limpieza rápida de mesas y cuentas abiertas.', '', back)}
+      ${salonResetCard({ open_orders: open, occupied_tables: occ }, { standalone: true })}`;
+  }
+
+  if (section === 'mesas') {
+    return `
+      ${pageHead('Mesas', 'Agregar, editar o quitar mesas del salón.', '', back)}
+      <div class="card form-narrow">
+        <div class="between"><div class="ticket-head" style="margin:0">Lista de mesas</div>
+          <button class="btn" data-act="new-table">Agregar mesa</button></div>
+        ${(state.tables || []).map((t) => `
+          <div class="table-row">
+            <span>${esc(t.name)} · ${t.seats} sillas</span>
+            <span class="row">
+              <button class="btn" data-act="edit-table" data-id="${t.id}">Editar</button>
+              <button class="btn danger" data-act="del-table" data-id="${t.id}">Quitar</button>
+            </span>
+          </div>`).join('') || '<p class="hint">Todavía no hay mesas.</p>'}
+      </div>`;
+  }
+
+  state.configSection = null;
+  return configView();
 }
 
 function bind() {
@@ -1877,7 +2026,27 @@ async function onClick(e) {
   if (!el || el.tagName === 'FORM' || el.tagName === 'INPUT' || el.tagName === 'SELECT') return;
   const act = el.dataset.act;
   try {
-    if (act === 'nav') { closeModal(); state.moreNav = false; go(el.dataset.view); }
+    if (act === 'nav') {
+      closeModal();
+      state.moreNav = false;
+      if (el.dataset.view === 'config') state.configSection = null;
+      go(el.dataset.view);
+    }
+    if (act === 'config-section') {
+      state.configSection = el.dataset.id || null;
+      render();
+      if (state.configSection === 'recibo') await refreshReceiptPreview();
+      return;
+    }
+    if (act === 'remove-receipt-logo') {
+      if (!await confirmDialog('¿Quitar el logo personalizado y volver al logo por defecto?', { title: 'Quitar logo' })) return;
+      const r = await api('/api/receipt-logo', { method: 'DELETE' });
+      state.receiptLogo = r.logo;
+      toast('Logo restablecido');
+      await refreshReceiptPreview({ silent: true });
+      render();
+      return;
+    }
     if (act === 'nav-filter') {
       closeModal();
       state.moreNav = false;
@@ -2010,6 +2179,24 @@ async function onClick(e) {
     if (act === 'cancel-item') await cancelItem(Number(el.dataset.id));
     if (act === 'send-order') await sendOrder();
     if (act === 'wait-pay') await waitPay();
+    if (act === 'toggle-takeaway') {
+      if (!state.order || state.busy) return;
+      const next = !state.order.takeaway;
+      state.busy = 'takeaway';
+      render();
+      try {
+        const r = await api(`/api/orders/${state.order.id}/takeaway`, {
+          method: 'POST',
+          body: { takeaway: next }
+        });
+        state.order = r.order;
+        toast(next ? 'Pedido para llevar' : 'Pedido en mesa');
+      } finally {
+        state.busy = null;
+        render();
+      }
+      return;
+    }
     if (act === 'cancel-order') await cancelOrder();
     if (act === 'reset-salon') await resetSalon();
     if (act === 'del-ing') await deleteIngredient(Number(el.dataset.id));
@@ -2083,11 +2270,9 @@ async function onSubmit(e) {
       if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
       const r = await api('/api/login', { method: 'POST', body: obj });
       state.user = r.user;
-      state.license = r.license || state.license;
       const me = await api('/api/me');
       state.settings = me.settings;
       state.alerts = me.alerts || [];
-      state.license = me.license || state.license;
       state.setup = me.setup || null;
       try { connectSocket(); } catch { /* el acceso no depende del socket */ }
       go(homeFor(r.user.role));
@@ -2140,7 +2325,9 @@ async function onSubmit(e) {
         });
         state.billDiscount = 0;
         state.billTip = 0;
+        state.billPromo = null;
         toast('Cuenta #' + r.invoice.number + ' cobrada');
+        if (r.promo?.applied) toast(r.promo.label || 'Segunda hamburguesa al 50%');
         if (r.change > 0) toast('Vuelto: ' + money(r.change));
         if (r.alerts?.length) {
           const nombres = r.alerts.slice(0, 2).map((a) => a.name).join(', ');
@@ -2195,11 +2382,18 @@ async function onSubmit(e) {
       return;
     }
     if (act === 'save-settings') {
-      obj.tax_included = obj.tax_included === '1';
-      obj.printer_enabled = obj.printer_enabled === '1';
-      obj.block_on_no_stock = obj.block_on_no_stock === '1';
-      await api('/api/settings', { method: 'PUT', body: obj });
+      if (obj.tax_included != null) obj.tax_included = obj.tax_included === '1';
+      if (obj.printer_enabled != null) obj.printer_enabled = obj.printer_enabled === '1';
+      if (obj.block_on_no_stock != null) obj.block_on_no_stock = obj.block_on_no_stock === '1';
+      if (obj.takeaway_fee_amount != null) {
+        obj.takeaway_fee_amount = Math.max(0, Math.round(Number(obj.takeaway_fee_amount) || 0));
+      }
+      const r = await api('/api/settings', { method: 'PUT', body: obj });
+      state.settings = r.settings;
       toast('Guardado');
+      if (state.view === 'config' && state.configSection === 'recibo') {
+        await refreshReceiptPreview({ silent: true });
+      }
     }
     if (act === 'save-ing') {
       const body = {
@@ -2263,17 +2457,110 @@ async function onInput(e) {
       });
     }
   }
+  if (e.target.dataset.act === 'receipt-footer-draft') {
+    clearTimeout(state._receiptPreviewTimer);
+    const footer = e.target.value;
+    state._receiptPreviewTimer = setTimeout(() => {
+      refreshReceiptPreview({ footer, silent: true });
+    }, 350);
+  }
 }
 
 async function onChange(e) {
   if (e.target.dataset.act === 'from') { state.from = e.target.value; await loadReports(); render(); }
   if (e.target.dataset.act === 'to') { state.to = e.target.value; await loadReports(); render(); }
   if (e.target.dataset.act === 'bill-adj') {
+    if (e.target.dataset.field === 'discount' && state.billPromo?.applied) return;
     const field = e.target.dataset.field;
     const val = Math.max(0, Math.round(Number(e.target.value) || 0));
     if (field === 'discount') state.billDiscount = val;
     if (field === 'tip') state.billTip = val;
     if (state.view === 'facturar' && state.order) render();
+  }
+  if (e.target.dataset.act === 'toggle-setting') {
+    const key = e.target.dataset.key;
+    if (!key || state.busy) return;
+    const on = !!e.target.checked;
+    state.busy = 'setting';
+    try {
+      const r = await api('/api/settings', { method: 'PUT', body: { [key]: on } });
+      state.settings = r.settings;
+      toast(on ? 'Activado' : 'Desactivado');
+    } catch (err) {
+      e.target.checked = !on;
+      toast(err.message || 'No se pudo guardar', true);
+    } finally {
+      state.busy = null;
+      render();
+    }
+  }
+  if (e.target.dataset.act === 'upload-receipt-logo') {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      state.busy = 'logo';
+      render();
+      const dataUrl = await imageFileToPngDataUrl(file);
+      const r = await api('/api/receipt-logo', { method: 'POST', body: { image: dataUrl } });
+      state.receiptLogo = r.logo;
+      toast('Logo del recibo guardado');
+      await refreshReceiptPreview({ silent: true });
+    } catch (err) {
+      toast(err.message || 'No se pudo cargar la imagen', true);
+    } finally {
+      state.busy = null;
+      render();
+    }
+  }
+}
+
+async function imageFileToPngDataUrl(file) {
+  if (!file || !file.type.startsWith('image/')) {
+    throw new Error('Elija un archivo de imagen');
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    throw new Error('La imagen es muy pesada (máx. 8 MB)');
+  }
+  const bmp = await createImageBitmap(file);
+  const maxW = 800;
+  const scale = bmp.width > maxW ? maxW / bmp.width : 1;
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const h = Math.max(1, Math.round(bmp.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(bmp, 0, 0, w, h);
+  bmp.close?.();
+  return canvas.toDataURL('image/png');
+}
+
+function bindReceiptPreview() {
+  const iframe = root.querySelector('.receipt-preview-iframe');
+  if (iframe && state.receiptPreviewHtml) {
+    iframe.srcdoc = state.receiptPreviewHtml;
+  }
+}
+
+async function refreshReceiptPreview({ footer, silent = false } = {}) {
+  try {
+    const s = state.settings || {};
+    const q = new URLSearchParams();
+    const foot = footer != null ? footer : s.ticket_footer;
+    if (foot != null) q.set('footer', String(foot));
+    if (s.business_address != null) q.set('address', String(s.business_address));
+    if (s.business_phone != null) q.set('phone', String(s.business_phone));
+    if (s.printer_width != null) q.set('width', String(s.printer_width));
+    const r = await api('/api/receipt-preview?' + q.toString());
+    state.receiptPreviewHtml = r.html || '';
+    state.receiptPreviewWidth = Number(r.width_mm) === 58 ? 58 : 80;
+    if (!silent) render();
+    else bindReceiptPreview();
+  } catch (err) {
+    if (!silent) toast(err.message || 'No se pudo cargar la vista previa', true);
   }
 }
 
@@ -2868,7 +3155,7 @@ function recipeRow(r, idx) {
       <input name="qty_${idx}" type="number" step="0.01" min="0" placeholder="Cant." value="${r.quantity ?? ''}" />
       <span class="recipe-unit">${esc(unitLabel)} / producto</span>
     </div>
-    <button type="button" class="btn ghost" data-act="del-rec" title="Quitar esta línea">✕</button>
+    <button type="button" class="btn ghost" data-act="del-rec" title="Quitar esta línea">âœ•</button>
     <label class="chk"><input type="checkbox" name="rem_${idx}" ${rem ? 'checked' : ''} /> Se puede quitar</label>
   </div>`;
 }

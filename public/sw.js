@@ -1,18 +1,18 @@
 /* JR Burger — service worker (caché de la interfaz; la API siempre va a la red) */
-const CACHE = 'jr-burger-v64';
+const CACHE = 'jr-burger-v71';
 
 /* Lo mínimo para que la app abra sin red. Los iconos de ingredientes no van aquí:
    son 58 archivos y el manejador de abajo los guarda solos la primera vez que se usan. */
 const SHELL = [
   '/',
   '/index.html',
-  '/css/fonts.css?v=64',
-  '/css/app.css?v=64',
+  '/css/fonts.css?v=71',
+  '/css/app.css?v=71',
   '/js/api.js',
-  '/js/app.js?v=64',
-  '/js/burger-pick.js?v=64',
+  '/js/app.js?v=71',
+  '/js/burger-pick.js?v=71',
   '/favicon.svg',
-  '/logo.webp?v=64',
+  '/logo.webp?v=71',
   '/patron.webp',
   '/manifest.webmanifest',
   '/fonts/outfit-400.woff2',
@@ -21,16 +21,16 @@ const SHELL = [
   '/fonts/outfit-700.woff2',
   '/fonts/alfa-slab-one.woff2',
   /* Categorías: se ven en la pantalla principal de venta, conviene tenerlas listas. */
-  '/icons/cats/adicional.webp?v=64',
-  '/icons/cats/arepa.webp?v=64',
-  '/icons/cats/bebida.webp?v=64',
-  '/icons/cats/carne.webp?v=64',
-  '/icons/cats/especial.webp?v=64',
-  '/icons/cats/hamburguesa.webp?v=64',
-  '/icons/cats/mazorca.webp?v=64',
-  '/icons/cats/menu.webp?v=64',
-  '/icons/cats/perro.webp?v=64',
-  '/icons/cats/salchipapa.webp?v=64'
+  '/icons/cats/adicional.webp?v=71',
+  '/icons/cats/arepa.webp?v=71',
+  '/icons/cats/bebida.webp?v=71',
+  '/icons/cats/carne.webp?v=71',
+  '/icons/cats/especial.webp?v=71',
+  '/icons/cats/hamburguesa.webp?v=71',
+  '/icons/cats/mazorca.webp?v=71',
+  '/icons/cats/menu.webp?v=71',
+  '/icons/cats/perro.webp?v=71',
+  '/icons/cats/salchipapa.webp?v=71'
 ];
 
 self.addEventListener('install', (event) => {

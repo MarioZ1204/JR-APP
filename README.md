@@ -32,12 +32,14 @@ npm start
 
 ## Usuarios iniciales (cámbielos)
 
-| Usuario | Contraseña | Rol |
-|---------|------------|-----|
+| Usuario | Contraseña inicial | Rol |
+|---------|-------------------|-----|
 | `admin` | `admin123` | Administrador |
 | `mesero` | `mesero123` | Mesas y comandas |
 | `cocina` | `cocina123` | Pantalla de cocina |
 | `cajero` | `cajero123` | Facturación y caja |
+
+Al primer ingreso el sistema exige cambiar la contraseña. No deje las claves por defecto en producción.
 
 ## Qué incluye
 
@@ -45,7 +47,7 @@ npm start
 - **Comandas:** productos, cantidades, notas (ej. sin cebolla), envío a cocina, anulación con registro de quién lo hizo.
 - **Cocina:** actualización en vivo (pendiente → preparación → listo → entregado).
 - **Facturación:** ticket 58 mm u 80 mm (configurable). Pagos en **efectivo, Nequi y Daviplata**, también combinados.
-- **Inventario:** insumos + receta por producto. Al facturar se descuenta el consumo. Alerta o bloqueo si no hay stock.
+- **Inventario:** insumos + receta por producto. Al enviar a cocina se descuenta el consumo. Alerta o bloqueo si no hay stock.
 - **Caja:** apertura/cierre de turno, egresos menores, historial y descuadre.
 - **Roles fijos** (no se inventan roles nuevos; sí se crean usuarios): Administrador, Mesero, Cocina, Cajero. El admin tiene todos los permisos.
 - **Reportes:** ventas, productos más vendidos, consumo de insumos, rendimiento por mesero.
