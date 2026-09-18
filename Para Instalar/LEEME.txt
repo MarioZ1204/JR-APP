@@ -1,0 +1,71 @@
+﻿================================================================================
+  JR SISTEMA â€” CARPETA PARA INSTALAR
+================================================================================
+
+Copie ESTA carpeta completa al PC del restaurante
+(por ejemplo: C:\JR-Sistema\ ).
+
+IMPORTANTE: NO la ponga en "Archivos de programa".
+Windows bloquea escribir ahi. Use C:\JR-Sistema
+
+Nombre del negocio por defecto: JR Burger
+(se puede cambiar en Ajustes).
+
+--------------------------------------------------------------------------------
+PRIMERA VEZ
+--------------------------------------------------------------------------------
+
+  1. Instale Node.js 22 o superior (LTS) desde:
+     https://nodejs.org
+
+  2. Doble clic en:  instalar.bat
+     (instala dependencias y deja el sistema listo)
+
+  3. Cada dia abra el programa con:
+       â€¢  El acceso directo "JR Sistema" del escritorio
+       â€¢  Si no aparece ^(cuenta sin admin^): ejecute crear-acceso-directo.bat
+       o â€¢ JR Sistema.exe dentro de C:\JR-Sistema
+
+  4. En el navegador entre con:
+       Usuario: admin
+       Clave:   admin123
+     y cambie la contraseÃ±a.
+
+--------------------------------------------------------------------------------
+USO DIARIO
+--------------------------------------------------------------------------------
+
+  â€¢ Abra "JR Sistema.exe" y deje la ventana abierta.
+  â€¢ El navegador se abre solo en http://localhost:3000
+  â€¢ Para cerrar: boton "Cerrar sistema" en la ventana.
+
+--------------------------------------------------------------------------------
+CELULAR / TABLET
+--------------------------------------------------------------------------------
+
+  Misma WiFi del local:
+  1. En la ventana de inicio vera la IP, ejemplo:
+     http://192.168.1.10:3000
+  2. Si el celular no entra, ejecute permitir-red.bat
+
+  Tailscale (fuera del local o con datos moviles):
+  1. Instale Tailscale en el PC y en el celular (misma cuenta)
+  2. Arranque JR Sistema; vera una IP 100.x.x.x o nombre MagicDNS
+  3. Abra esa direccion en el celular con Tailscale activo
+
+--------------------------------------------------------------------------------
+QUE HAY EN ESTA CARPETA
+--------------------------------------------------------------------------------
+
+  JR Sistema.exe     Abrir el sistema (ventana simple)
+  instalar.bat       Solo la primera vez
+  iniciar.bat        Alternativa sin .exe
+  permitir-red.bat   Firewall para celulares
+  server\ public\    Programa
+  data\              Se crea la base de datos al arrancar
+  docs\              Manuales
+
+NO borre ni mueva archivos de adentro de la carpeta.
+Mas detalle: INSTRUCCIONES-INSTALACION.txt
+
+================================================================================
